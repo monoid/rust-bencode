@@ -113,7 +113,7 @@ impl<T: Iterator<Item=u8>> StreamingParser<T> {
             }
             _ => 1
         };
-        let num = try!(self.parse_number_digits(sign));
+        let num = self.parse_number_digits(sign)?;
         expect!(self, 'e', "e".to_string());
         Ok(num)
     }
@@ -162,9 +162,9 @@ impl<T: Iterator<Item=u8>> StreamingParser<T> {
 
     #[inline(always)]
     fn parse_bytestring(&mut self) -> Result<Vec<u8>, Error> {
-        let len = try!(self.parse_length_digits(1));
+        let len = self.parse_length_digits(1)?;
         expect!(self, ':', ":".to_string());
-        let bytes = try!(self.next_bytes(len as usize));
+        let bytes = self.next_bytes(len as usize)?;
         Ok(bytes)
     }
 
@@ -186,7 +186,7 @@ impl<T: Iterator<Item=u8>> StreamingParser<T> {
         match self.curr_char() {
             Some('0' ... '9') => {
                 self.decoded += 1;
-                let res = try!(self.parse_bytestring());
+                let res = self.parse_bytestring()?;
                 Ok(DictKey(res))
             }
             Some('e') => self.parse_end(),
@@ -201,13 +201,13 @@ impl<T: Iterator<Item=u8>> StreamingParser<T> {
                 check_nesting!(self);
                 self.next_byte();
                 self.decoded += 1;
-                let res = try!(self.parse_number());
+                let res = self.parse_number()?;
                 Ok(NumberValue(res))
             }
             Some('0' ... '9') => {
                 check_nesting!(self);
                 self.decoded += 1;
-                let res = try!(self.parse_bytestring());
+                let res = self.parse_bytestring()?;
                 Ok(ByteStringValue(res))
             }
             Some('l') => {
