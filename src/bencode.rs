@@ -289,7 +289,7 @@ pub type ListVec = Vec<Bencode>;
 pub type DictMap = BTreeMap<util::ByteString, Bencode>;
 
 impl Bencode {
-    pub fn to_writer(&self, writer: &mut io::Write) -> io::Result<()> {
+    pub fn to_writer(&self, writer: &mut dyn io::Write) -> io::Result<()> {
         let mut encoder = Encoder::new(writer);
         self.encode(&mut encoder)
     }
@@ -719,7 +719,7 @@ macro_rules! tryenc(($e:expr) => (
 pub type EncoderResult<T> = io::Result<T>;
 
 pub struct Encoder<'a> {
-    writer: &'a mut (io::Write + 'a),
+    writer: &'a mut (dyn io::Write + 'a),
     writers: Vec<Vec<u8>>,
     expect_key: bool,
     keys: Vec<util::ByteString>,
@@ -728,7 +728,7 @@ pub struct Encoder<'a> {
 }
 
 impl<'a> Encoder<'a> {
-    pub fn new(writer: &'a mut io::Write) -> Encoder<'a> {
+    pub fn new(writer: &'a mut dyn io::Write) -> Encoder<'a> {
         Encoder {
             writer: writer,
             writers: Vec::new(),
@@ -739,11 +739,11 @@ impl<'a> Encoder<'a> {
         }
     }
 
-    fn get_writer(&mut self) -> &mut io::Write {
+    fn get_writer(&mut self) -> &mut dyn io::Write {
         if self.writers.len() == 0 {
-            &mut self.writer as &mut io::Write
+            &mut self.writer as &mut dyn io::Write
         } else {
-            self.writers.last_mut().unwrap() as &mut io::Write
+            self.writers.last_mut().unwrap() as &mut dyn io::Write
         }
     }
 
