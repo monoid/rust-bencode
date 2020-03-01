@@ -15,17 +15,17 @@
 
   # Encoding
 
-  ## Using `Encodable`
+  ## Using `Serialize`
 
   ```rust
-  extern crate rustc_serialize;
+  extern crate serde;
   extern crate bencode;
 
-  use rustc_serialize::Encodable;
+  use serde::Serialize;
 
   use bencode::encode;
 
-  #[derive(RustcEncodable)]
+  #[derive(Serialize)]
   struct MyStruct {
       string: String,
       id: usize,
@@ -73,17 +73,17 @@
 
   # Decoding
 
-  ## Using `Decodable`
+  ## Using `Deserialize`
 
   ```rust
-  extern crate rustc_serialize;
+  extern crate serde;
   extern crate bencode;
 
-  use rustc_serialize::{Encodable, Decodable};
+  use serde::{Serialize, Deserialize};
 
   use bencode::{encode, Decoder};
 
-  #[derive(RustcEncodable, RustcDecodable, PartialEq)]
+  #[derive(Serialize, Deserialize, PartialEq)]
   struct MyStruct {
       a: i32,
       b: String,
@@ -96,7 +96,7 @@
 
       let bencode: bencode::Bencode = bencode::from_vec(enc).unwrap();
       let mut decoder = Decoder::new(&bencode);
-      let result: MyStruct = Decodable::decode(&mut decoder).unwrap();
+      let result: MyStruct = Deserialize::deserialize(&mut decoder).unwrap();
       assert!(s == result)
   }
   ```
@@ -163,16 +163,16 @@
   ## Using Streaming Parser
 
   ```rust
-  extern crate rustc_serialize;
+  extern crate serde;
   extern crate bencode;
 
   use bencode::streaming::BencodeEvent;
   use bencode::streaming::StreamingParser;
-  use rustc_serialize::Encodable;
+  use serde::{Serialize, Deserialize};
 
   use bencode::encode;
 
-  #[derive(RustcEncodable, RustcDecodable, PartialEq)]
+  #[derive(Serialize, Deserialize, PartialEq)]
   struct MyStruct {
       a: i32,
       b: String,
@@ -199,7 +199,7 @@
 
 #![cfg_attr(all(test, feature = "nightly"), feature(test))]
 
-extern crate rustc_serialize;
+extern crate serde;
 extern crate byteorder;
 extern crate num_traits;
 
@@ -209,8 +209,7 @@ use std::str::{self, Utf8Error};
 use std::vec::Vec;
 use std::mem::size_of;
 
-use rustc_serialize as serialize;
-use rustc_serialize::Encodable;
+use serde::{de, ser, Serialize};
 
 use byteorder::{ReadBytesExt, WriteBytesExt, BigEndian};
 use num_traits::FromPrimitive;
@@ -289,28 +288,30 @@ pub type ListVec = Vec<Bencode>;
 pub type DictMap = BTreeMap<util::ByteString, Bencode>;
 
 impl Bencode {
-    pub fn to_writer(&self, writer: &mut dyn io::Write) -> io::Result<()> {
+    pub fn to_writer<W: io::Write>(&self, writer: W) ->
+        Result<<&'_ mut Encoder<W> as serde::Serializer>::Ok,
+               <&'_ mut Encoder<W> as serde::Serializer>::Error> {
         let mut encoder = Encoder::new(writer);
-        self.encode(&mut encoder)
+        self.serialize(&mut encoder)
     }
 
-    pub fn to_bytes(&self) -> io::Result<Vec<u8>> {
+    pub fn to_bytes(&self) -> EncoderResult<Vec<u8>> {
         let mut writer = vec![];
-        match self.to_writer(&mut writer) {
-            Ok(_) => Ok(writer),
-            Err(err) => Err(err)
-        }
+        Ok(self.to_writer(&mut writer).and(Ok(writer))?)
     }
 }
 
-impl Encodable for Bencode {
-    fn encode<S: serialize::Encoder>(&self, e: &mut S) -> Result<(), S::Error> {
+impl serde::Serialize for Bencode {
+    fn serialize<S: serde::Serializer>(&self, e: S) -> Result<S::Ok, S::Error> {
         match self {
-            &Bencode::Empty => Ok(()),
-            &Bencode::Number(v) => e.emit_i64(v),
-            &Bencode::ByteString(ref v) => e.emit_str(unsafe { str::from_utf8_unchecked(v) }),
-            &Bencode::List(ref v) => v.encode(e),
-            &Bencode::Dict(ref v) => v.encode(e)
+            // Not a backward compatible, as rust-serialize version
+            // did nothing, returning Ok(()); but we cannot do nothing
+            // with Serde as we have tor return S::Ok somehow.
+            &Bencode::Empty => e.serialize_none(),
+            &Bencode::Number(v) => e.serialize_i64(v),
+            &Bencode::ByteString(ref v) => e.serialize_str(unsafe { str::from_utf8_unchecked(v) }),
+            &Bencode::List(ref v) => v.serialize(e),
+            &Bencode::Dict(ref v) => v.serialize(e)
         }
     }
 }
@@ -695,31 +696,14 @@ pub fn from_iter<T: Iterator<Item=u8>>(iter: T) -> Result<Bencode, Error> {
     parser.parse()
 }
 
-pub fn encode<T: serialize::Encodable>(t: T) -> io::Result<Vec<u8>> {
+pub fn encode<T: serde::Serialize>(t: T) -> EncoderResult<Vec<u8>> {
     let mut w = vec![];
-    {
-        let mut encoder = Encoder::new(&mut w);
-        match t.encode(&mut encoder) {
-            Err(e) => return Err(e),
-            _ => {}
-        }
-    }
-    Ok(w)
+    let mut encoder = Encoder::new(&mut w);
+    t.serialize(&mut encoder).and(Ok(w))
 }
 
-macro_rules! tryenc(($e:expr) => (
-    match $e {
-        Ok(e) => e,
-        Err(e) => {
-            return
-        }
-    }
-));
-
-pub type EncoderResult<T> = io::Result<T>;
-
-pub struct Encoder<'a> {
-    writer: &'a mut (dyn io::Write + 'a),
+pub struct Encoder<W: io::Write> {
+    writer: W,
     writers: Vec<Vec<u8>>,
     expect_key: bool,
     keys: Vec<util::ByteString>,
@@ -727,8 +711,8 @@ pub struct Encoder<'a> {
     stack: Vec<BTreeMap<util::ByteString, Vec<u8>>>,
 }
 
-impl<'a> Encoder<'a> {
-    pub fn new(writer: &'a mut dyn io::Write) -> Encoder<'a> {
+impl<W: io::Write> Encoder<W> {
+    pub fn new(writer: W) -> Encoder<W> {
         Encoder {
             writer: writer,
             writers: Vec::new(),
@@ -747,13 +731,26 @@ impl<'a> Encoder<'a> {
         }
     }
 
-    fn encode_dict(&mut self, dict: &BTreeMap<util::ByteString, Vec<u8>>) -> EncoderResult<()> {
+    pub fn into_inner(self) -> W {
+        if self.writers.len() == 0 {
+            self.writer
+        } else {
+            // Invariant is: into_inner is called only by user code when Encoder::encode call
+            // is complete, and when it is complete, self.writers is empty.
+            panic!(
+                "Destroying unflushed bencode Encoder.  Shouldn't happen, some invariant is broken."
+            );
+        }
+    }
+
+    fn encode_dict<'b, 'c>(&'b mut self, dict: &'c BTreeMap<util::ByteString, Vec<u8>>) -> EncoderResult<()> {
         write!(self.get_writer(), "d")?;
         for (key, value) in dict.iter() {
-            key.encode(self)?;
+            key.serialize(& mut *self)?;
             self.get_writer().write_all(value)?;
         }
-        write!(self.get_writer(), "e")
+        write!(self.get_writer(), "e")?;
+        Ok(())
     }
 
     fn encode_bytestring(&mut self, v: &[u8]) -> EncoderResult<()> {
@@ -762,12 +759,12 @@ impl<'a> Encoder<'a> {
             Ok(())
         } else {
             write!(self.get_writer(), "{}:", v.len())?;
-            self.get_writer().write_all(v)
+            Ok(self.get_writer().write_all(v)?)
         }
     }
 
-    fn error(&mut self, msg: &'static str) -> EncoderResult<()> {
-        Err(io::Error::new(io::ErrorKind::InvalidInput, msg))
+    fn error<T>(&mut self, msg: &'static str) -> EncoderResult<T> {
+        Err(io::Error::new(io::ErrorKind::InvalidInput, msg).into())
     }
 }
 
@@ -777,178 +774,289 @@ macro_rules! expect_value(($slf:expr) => {
     }
 });
 
-impl<'a> serialize::Encoder for Encoder<'a> {
-    type Error = io::Error;
 
-    fn emit_nil(&mut self) -> EncoderResult<()> { expect_value!(self); write!(self.get_writer(), "0:") }
+#[derive(Debug)]
+pub enum SerializeErr {
+    Io(io::Error),
+    Msg(String),
+}
 
-    fn emit_usize(&mut self, v: usize) -> EncoderResult<()> { self.emit_i64(v as i64) }
+impl fmt::Display for SerializeErr {
+    fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(fmt, "{:?}", self)
+    }
+}
 
-    fn emit_u8(&mut self, v: u8) -> EncoderResult<()> { self.emit_i64(v as i64) }
+impl std::error::Error for SerializeErr {
+}
 
-    fn emit_u16(&mut self, v: u16) -> EncoderResult<()> { self.emit_i64(v as i64) }
+impl From<io::Error> for SerializeErr {
+    fn from(e: io::Error) -> Self {
+        SerializeErr::Io(e)
+    }
+}
 
-    fn emit_u32(&mut self, v: u32) -> EncoderResult<()> { self.emit_i64(v as i64) }
+impl ser::Error for SerializeErr {
+    fn custom<T: fmt::Display>(msg: T) -> Self {
+        SerializeErr::Msg(msg.to_string())
+    }
+}
 
-    fn emit_u64(&mut self, v: u64) -> EncoderResult<()> { self.emit_i64(v as i64) }
+pub type EncoderResult<T> = Result<T, SerializeErr>;
 
-    fn emit_isize(&mut self, v: isize) -> EncoderResult<()> { self.emit_i64(v as i64) }
+impl<'a, W: io::Write> serde::Serializer for &'a mut Encoder<W> {
+    type Ok = ();
+    type Error = SerializeErr;
+    type SerializeSeq = Self;
+    type SerializeTuple = Self;
+    type SerializeMap = Self;
+    type SerializeStruct = Self;
+    type SerializeTupleStruct = ser::Impossible<(), Self::Error>;
+    type SerializeTupleVariant = ser::Impossible<(), Self::Error>;
+    type SerializeStructVariant = ser::Impossible<(), Self::Error>;
 
-    fn emit_i8(&mut self, v: i8) -> EncoderResult<()> { self.emit_i64(v as i64) }
+    fn serialize_unit(self) -> EncoderResult<()> {
+        expect_value!(self);
+        Ok(write!(self.get_writer(), "0:")?)
+    }
 
-    fn emit_i16(&mut self, v: i16) -> EncoderResult<()> { self.emit_i64(v as i64) }
+    fn serialize_none(self) -> EncoderResult<()> {
+        expect_value!(self);
+        self.is_none = true;
+        Ok(write!(self.get_writer(), "3:nil")?)
+    }
 
-    fn emit_i32(&mut self, v: i32) -> EncoderResult<()> { self.emit_i64(v as i64) }
+    fn serialize_some<T: ?Sized + serde::Serialize>(self, value: &T) -> EncoderResult<()> {
+        expect_value!(self);
+        value.serialize(self)
+    }
 
-    fn emit_i64(&mut self, v: i64) -> EncoderResult<()> { expect_value!(self); write!(self.get_writer(), "i{}e", v) }
+    fn serialize_u8(self, v: u8) -> EncoderResult<()> { self.serialize_i64(v as i64) }
 
-    fn emit_bool(&mut self, v: bool) -> EncoderResult<()> {
+    fn serialize_u16(self, v: u16) -> EncoderResult<()> { self.serialize_i64(v as i64) }
+
+    fn serialize_u32(self, v: u32) -> EncoderResult<()> { self.serialize_i64(v as i64) }
+
+    fn serialize_u64(self, v: u64) -> EncoderResult<()> {
+        expect_value!(self);
+        Ok(write!(self.get_writer(), "i{}e", v)?)
+    }
+
+    fn serialize_i8(self, v: i8) -> EncoderResult<()> { self.serialize_i64(v as i64) }
+
+    fn serialize_i16(self, v: i16) -> EncoderResult<()> { self.serialize_i64(v as i64) }
+
+    fn serialize_i32(self, v: i32) -> EncoderResult<()> { self.serialize_i64(v as i64) }
+
+    fn serialize_i64(self, v: i64) -> EncoderResult<()> {
+        expect_value!(self);
+        Ok(write!(self.get_writer(), "i{}e", v)?)
+    }
+
+    fn serialize_bool(self, v: bool) -> EncoderResult<()> {
         expect_value!(self);
         if v {
-            self.emit_str("true")
+            self.serialize_str("true")
         } else {
-            self.emit_str("false")
+            self.serialize_str("false")
         }
     }
 
-    fn emit_f32(&mut self, v: f32) -> EncoderResult<()> {
+    fn serialize_f32(self, v: f32) -> EncoderResult<()> {
         expect_value!(self);
-        let mut buf = [0u8; 4];
-        Cursor::new(&mut buf[..]).write_f32::<BigEndian>(v).unwrap();
+        let mut buf = vec![];
+        buf.write_f32::<BigEndian>(v).unwrap();
         self.encode_bytestring(&buf[..])
     }
 
-    fn emit_f64(&mut self, v: f64) -> EncoderResult<()> {
+    fn serialize_f64(self, v: f64) -> EncoderResult<()> {
         expect_value!(self);
-        let mut buf = [0u8; 8];
-        Cursor::new(&mut buf[..]).write_f64::<BigEndian>(v).unwrap();
+        let mut buf = vec![];
+        buf.write_f64::<BigEndian>(v).unwrap();
         self.encode_bytestring(&buf[..])
     }
 
-    fn emit_char(&mut self, v: char) -> EncoderResult<()> {
+    fn serialize_char(self, v: char) -> EncoderResult<()> {
         expect_value!(self);
         self.encode_bytestring(&v.to_string().as_bytes())
     }
 
-    fn emit_str(&mut self, v: &str) -> EncoderResult<()> {
+    fn serialize_str(self, v: &str) -> EncoderResult<()> {
         self.encode_bytestring(v.as_bytes())
     }
 
-    fn emit_enum<F>(&mut self, _name: &str, _f: F) -> EncoderResult<()> where F: FnOnce(&mut Encoder<'a>) -> EncoderResult<()> {
-        self.error("emit_enum not implemented")
+    fn serialize_newtype_variant<T: ?Sized>(
+        self,
+        _name: &'static str,
+        _variant_index: u32,
+        _variant: &'static str,
+        _value: &T) -> EncoderResult<()> {
+        self.error("serialize_newtype_variant not implemented")
     }
 
-    fn emit_enum_variant<F>(&mut self, _v_name: &str, _v_id: usize, _len: usize, _f: F) -> EncoderResult<()> where F: FnOnce(&mut Encoder<'a>) -> EncoderResult<()> {
-        self.error("emit_enum_variant not implemented")
+    fn serialize_bytes(self, v: &[u8]) -> EncoderResult<()> {
+        self.encode_bytestring(v)
     }
 
-    fn emit_enum_variant_arg<F>(&mut self, _a_idx: usize, _f: F) -> EncoderResult<()> where F: FnOnce(&mut Encoder<'a>) -> EncoderResult<()> {
-        self.error("emit_enum_variant_arg not implemented")
-    }
-
-    fn emit_enum_struct_variant<F>(&mut self, _v_name: &str, _v_id: usize, _len: usize, _f: F) -> EncoderResult<()> where F: FnOnce(&mut Encoder<'a>) -> EncoderResult<()> {
-        self.error("emit_enum_struct_variant not implemented")
-    }
-
-    fn emit_enum_struct_variant_field<F>(&mut self, _f_name: &str, _f_idx: usize, _f: F) -> EncoderResult<()> where F: FnOnce(&mut Encoder<'a>) -> EncoderResult<()> {
-        self.error("emit_enum_struct_variant_field not implemented")
-    }
-
-    fn emit_struct<F>(&mut self, _name: &str, _len: usize, f: F) -> EncoderResult<()> where F: FnOnce(&mut Encoder<'a>) -> EncoderResult<()> {
+    fn serialize_seq(self, _len: Option<usize>) -> EncoderResult<Self> {
         expect_value!(self);
+        write!(self.get_writer(), "l")?;  // SerializeSeq::end will write "e"
+        Ok(self)
+    }
+
+    fn serialize_tuple(self, _len: usize) -> EncoderResult<Self> {
+        self.error("serialize_tuple not implemented")
+    }
+
+    fn serialize_map(self, _size: Option<usize>) -> EncoderResult<Self> {
+        expect_value!(self);
+        // bencode requires keys to be sorted, thus we store key-values into btree.
+        // TODO: hash+sort can be more efficient than btree.
         self.stack.push(BTreeMap::new());
-        f(self)?;
-        let dict = self.stack.pop().unwrap();
-        self.encode_dict(&dict)?;
-        self.is_none = false;
-        Ok(())
+        Ok(self)
     }
 
-    fn emit_struct_field<F>(&mut self, f_name: &str, _f_idx: usize, f: F) -> EncoderResult<()> where F: FnOnce(&mut Encoder<'a>) -> EncoderResult<()> {
+    fn serialize_tuple_struct(self, _name: &'static str, _len: usize)
+                              -> EncoderResult<Self::SerializeTupleStruct> {
+        self.error("serialize_tuple_struct not implemented")
+    }
+
+    fn serialize_tuple_variant(
+        self,
+        _name: &'static str,
+        _variant_index: u32,
+        _variant: &'static str,
+        _len: usize) -> Result<Self::SerializeTupleVariant, Self::Error> {
+        self.error("serialize_tuple_variant not implemented")
+    }
+
+    fn serialize_unit_struct(self, _name: &'static str) -> Result<Self::Ok, Self::Error> {
+        self.serialize_unit()
+    }
+
+    fn serialize_unit_variant(self,
+                              _name: &'static str,
+                              _variant_index: u32,
+                              _variant: &'static str) -> Result<Self::Ok, Self::Error> {
+        self.error("serialize_unit_variant not implemented")
+    }
+
+    fn serialize_struct_variant(self,
+                                _name: &'static str,
+                                _variant_index: u32,
+                                _variant: &'static str,
+                                _len: usize,
+    ) -> Result<Self::SerializeStructVariant, Self::Error> {
+        self.error("serialize_struct_variant not implemented")
+    }
+
+    fn serialize_newtype_struct<T: ?Sized + serde::Serialize>(
+        self,
+        _name: &'static str,
+        value: &T
+    ) -> Result<Self::Ok, Self::Error> {
+        value.serialize(self)
+    }
+
+    fn serialize_struct(
+        self,
+        _name: &'static str,
+        _len: usize
+    ) -> Result<Self, Self::Error> {
         expect_value!(self);
-        self.writers.push(vec![]);
-        f(self)?;
-        let data = self.writers.pop().unwrap();
-        let dict = self.stack.last_mut().unwrap();
-        if !self.is_none {
-            dict.insert(util::ByteString::from_slice(f_name.as_bytes()), data);
-        }
-        self.is_none = false;
-        Ok(())
-    }
-
-    fn emit_tuple<F>(&mut self, _len: usize, _f: F) -> EncoderResult<()> where F: FnOnce(&mut Encoder<'a>) -> EncoderResult<()> {
-        self.error("emit_tuple not implemented")
-    }
-
-    fn emit_tuple_arg<F>(&mut self, _idx: usize, _f: F) -> EncoderResult<()> where F: FnOnce(&mut Encoder<'a>) -> EncoderResult<()> {
-        self.error("emit_tuple_arg not implemented")
-    }
-    fn emit_tuple_struct<F>(&mut self, _name: &str, _len: usize, _f: F) -> EncoderResult<()> where F: FnOnce(&mut Encoder<'a>) -> EncoderResult<()> {
-        self.error("emit_tuple_struct not implemented")
-    }
-    fn emit_tuple_struct_arg<F>(&mut self, _f_idx: usize, _f: F) -> EncoderResult<()> where F: FnOnce(&mut Encoder<'a>) -> EncoderResult<()> {
-        self.error("emit_tuple_struct_arg not implemented")
-    }
-
-    fn emit_option<F>(&mut self, f: F) -> EncoderResult<()> where F: FnOnce(&mut Encoder<'a>) -> EncoderResult<()> {
-        expect_value!(self);
-        f(self)
-    }
-
-    fn emit_option_none(&mut self) -> EncoderResult<()> {
-        expect_value!(self);
-        self.is_none = true;
-        write!(self.get_writer(), "3:nil")
-    }
-
-    fn emit_option_some<F>(&mut self, f: F) -> EncoderResult<()> where F: FnOnce(&mut Encoder<'a>) -> EncoderResult<()> {
-        expect_value!(self);
-        f(self)
-    }
-
-    fn emit_seq<F>(&mut self, _len: usize, f: F) -> EncoderResult<()> where F: FnOnce(&mut Encoder<'a>) -> EncoderResult<()> {
-        expect_value!(self);
-        write!(self.get_writer(), "l")?;
-        f(self)?;
-        self.is_none = false;
-        write!(self.get_writer(), "e")
-    }
-
-    fn emit_seq_elt<F>(&mut self, _idx: usize, f: F) -> EncoderResult<()> where F: FnOnce(&mut Encoder<'a>) -> EncoderResult<()> {
-        expect_value!(self);
-        f(self)?;
-        self.is_none = false;
-        Ok(())
-    }
-
-    fn emit_map<F>(&mut self, _len: usize, f: F) -> EncoderResult<()> where F: FnOnce(&mut Encoder<'a>) -> EncoderResult<()> {
-        expect_value!(self);
+        // We serialize struct as a map {field_name: value}.
         self.stack.push(BTreeMap::new());
-        f(self)?;
-        let dict = self.stack.pop().unwrap();
-        self.encode_dict(&dict)?;
-        self.is_none = false;
-        Ok(())
+        Ok(self)
+    }
+}
+
+impl<W: io::Write> ser::SerializeSeq for &mut Encoder<W> {
+    type Ok = ();
+    type Error = SerializeErr;
+
+    fn serialize_element<'c, 'd, T: serde::Serialize + ?Sized>(&'c mut self, elt: &'d T) -> EncoderResult<()> {
+        let selff = &mut **self;
+        elt.serialize(selff)
     }
 
-    fn emit_map_elt_key<F>(&mut self, _idx: usize, f: F) -> EncoderResult<()> where F: FnOnce(&mut Encoder<'a>) -> EncoderResult<()> {
+    fn end(self) -> EncoderResult<()> {
+        self.is_none = false;
+        Ok(write!(self.get_writer(), "e")?)
+    }
+}
+
+impl<W: io::Write> ser::SerializeTuple for &mut Encoder<W> {
+    type Ok = ();
+    type Error = SerializeErr;
+
+    fn serialize_element<T: serde::Serialize + ?Sized>(&mut self, _elt: &T) -> EncoderResult<()> {
+        self.error("serialize_tuple not implemented")
+    }
+
+    fn end(self) -> Result<Self::Ok, Self::Error> {
+        self.error("serialize_tuple not implemented")
+    }
+}
+
+impl<W: io::Write> ser::SerializeMap for &mut Encoder<W> {
+    type Ok = ();
+    type Error = SerializeErr;
+
+    fn serialize_key<T: ?Sized>(&mut self, key: &T) -> EncoderResult<()>
+    where T: serde::Serialize {
         expect_value!(self);
         self.writers.push(vec![]);
         self.expect_key = true;
-        f(self)?;
+        key.serialize(&mut **self)?;
         self.expect_key = false;
         self.is_none = false;
         Ok(())
     }
 
-    fn emit_map_elt_val<F>(&mut self, _idx: usize, f: F) -> EncoderResult<()> where F: FnOnce(&mut Encoder<'a>) -> EncoderResult<()> {
+    fn serialize_value<T: ?Sized>(&mut self, val: &T) -> EncoderResult<()>
+    where T: serde::Serialize{
         expect_value!(self);
-        f(self)?;
+        val.serialize(&mut **self)?;
         let key = self.keys.pop();
         let data = self.writers.pop().unwrap();
         let dict = self.stack.last_mut().unwrap();
-        dict.insert(key.unwrap(), data);
+        dict.insert(key.unwrap(), data);  // TODO why key is not unwrapped before?
+        self.is_none = false;
+        Ok(())
+    }
+
+    fn end(self) -> Result<Self::Ok, Self::Error> {
+        let dict = self.stack.pop().unwrap();
+        self.encode_dict(&dict)?;
+        self.is_none = false;
+        Ok(())
+    }
+}
+
+
+// Struct is serialized as a map {field_name: value}.
+impl<W: io::Write> ser::SerializeStruct for &mut Encoder<W> {
+    type Ok = ();
+    type Error = SerializeErr;
+
+    fn serialize_field<T: ?Sized>(&mut self, key: &'static str, value: &T) -> EncoderResult<()>
+    where T: serde::Serialize {
+        expect_value!(self);
+        self.writers.push(vec![]);
+        value.serialize(&mut **self)?;
+
+        let data = self.writers.pop().unwrap();
+        let dict = self.stack.last_mut().unwrap();
+        if !self.is_none {  // It seems fields with None values are just skipped, that makes sens.
+            dict.insert(util::ByteString::from_slice(key.as_bytes()), data);
+        }
+        self.is_none = false;
+        Ok(())
+    }
+
+    fn end(self) -> Result<Self::Ok, Self::Error> {
+        let dict = self.stack.pop().unwrap();
+        self.encode_dict(&dict)?;
         self.is_none = false;
         Ok(())
     }
@@ -1046,8 +1154,6 @@ macro_rules! dec_expect_value(($slf:expr) => {
     }
 });
 
-static EMPTY: Bencode = Empty;
-
 #[derive(Eq, PartialEq, Clone, Debug)]
 pub enum DecoderError {
     Message(String),
@@ -1056,16 +1162,32 @@ pub enum DecoderError {
     Unimplemented(&'static str),
 }
 
-pub type DecoderResult<T> = Result<T, DecoderError>;
-
-pub struct Decoder<'a> {
-    keys: Vec<util::ByteString>,
-    expect_key: bool,
-    stack: Vec<&'a Bencode>,
+impl fmt::Display for DecoderError {
+    fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(fmt, "{:?}", self)
+    }
 }
 
-impl<'a> Decoder<'a> {
-    pub fn new(bencode: &'a Bencode) -> Decoder<'a> {
+impl de::StdError for DecoderError {
+}
+
+impl de::Error for DecoderError {
+    fn custom<T>(msg: T) -> Self
+    where T: fmt::Display {
+        DecoderError::Message(msg.to_string())
+    }
+}
+
+pub type DecoderResult<T> = Result<T, DecoderError>;
+
+pub struct Decoder<'de> {
+    keys: Vec<util::ByteString>,
+    expect_key: bool,
+    stack: Vec<&'de Bencode>,
+}
+
+impl<'de> Decoder<'de> {
+    pub fn new(bencode: &'de Bencode) -> Decoder<'de> {
         Decoder {
             keys: Vec::new(),
             expect_key: false,
@@ -1084,236 +1206,295 @@ impl<'a> Decoder<'a> {
     fn unimplemented<T>(&self, m: &'static str) -> DecoderResult<T> {
         Err(Unimplemented(m))
     }
+
+    fn error<T, M: fmt::Display>(&self, m: M) -> DecoderResult<T> {
+        Err(<DecoderError as de::Error>::custom(m))
+    }
 }
 
-impl<'a> serialize::Decoder for Decoder<'a> {
+impl<'de, 'a> serde::Deserializer<'de> for &'a mut Decoder<'de> {
     type Error = DecoderError;
 
-    fn error(&mut self, err: &str) -> DecoderError {
-        Message(err.to_string())
+    fn deserialize_any<V: de::Visitor<'de>>(self, _visitor: V) -> DecoderResult<V::Value> {
+        self.unimplemented("deserialize_any not implemented")
     }
 
-    fn read_nil(&mut self) -> DecoderResult<()> {
+    fn deserialize_bool<V: de::Visitor<'de>>(self, visitor: V) -> DecoderResult<V::Value> {
         dec_expect_value!(self);
-        self.try_read("nil")
+        visitor.visit_bool(self.try_read("bool")?)
     }
 
-    fn read_usize(&mut self) -> DecoderResult<usize> {
+    fn deserialize_u8<V: de::Visitor<'de>>(self, visitor: V) -> DecoderResult<V::Value> {
         dec_expect_value!(self);
-        self.try_read("usize")
+        visitor.visit_u8(self.try_read("u8")?)
     }
 
-    fn read_u8(&mut self) -> DecoderResult<u8> {
+    fn deserialize_u16<V: de::Visitor<'de>>(self, visitor: V) -> DecoderResult<V::Value> {
         dec_expect_value!(self);
-        self.try_read("u8")
+        visitor.visit_u16(self.try_read("u16")?)
     }
 
-    fn read_u16(&mut self) -> DecoderResult<u16> {
+    fn deserialize_u32<V: de::Visitor<'de>>(self, visitor: V) -> DecoderResult<V::Value> {
         dec_expect_value!(self);
-        self.try_read("u16")
+        visitor.visit_u32(self.try_read("u32")?)
     }
 
-    fn read_u32(&mut self) -> DecoderResult<u32> {
+    fn deserialize_u64<V: de::Visitor<'de>>(self, visitor: V) -> DecoderResult<V::Value> {
         dec_expect_value!(self);
-        self.try_read("u32")
+        visitor.visit_u64(self.try_read("u64")?)
     }
 
-    fn read_u64(&mut self) -> DecoderResult<u64> {
+    fn deserialize_i8<V: de::Visitor<'de>>(self, visitor: V) -> DecoderResult<V::Value> {
         dec_expect_value!(self);
-        self.try_read("u64")
+        visitor.visit_i8(self.try_read("i8")?)
     }
 
-    fn read_isize(&mut self) -> DecoderResult<isize> {
+    fn deserialize_i16<V: de::Visitor<'de>>(self, visitor: V) -> DecoderResult<V::Value> {
         dec_expect_value!(self);
-        self.try_read("isize")
+        visitor.visit_i16(self.try_read("i16")?)
     }
 
-    fn read_i8(&mut self) -> DecoderResult<i8> {
+    fn deserialize_i32<V: de::Visitor<'de>>(self, visitor: V) -> DecoderResult<V::Value> {
         dec_expect_value!(self);
-        self.try_read("i8")
+        visitor.visit_i32(self.try_read("i32")?)
     }
 
-    fn read_i16(&mut self) -> DecoderResult<i16> {
+    fn deserialize_i64<V: de::Visitor<'de>>(self, visitor: V) -> DecoderResult<V::Value> {
         dec_expect_value!(self);
-        self.try_read("i16")
+        visitor.visit_i64(self.try_read("i64")?)
     }
 
-    fn read_i32(&mut self) -> DecoderResult<i32> {
+    fn deserialize_f32<V: de::Visitor<'de>>(self, visitor: V) -> DecoderResult<V::Value> {
         dec_expect_value!(self);
-        self.try_read("i32")
+        visitor.visit_f32(self.try_read("f32")?)
     }
 
-    fn read_i64(&mut self) -> DecoderResult<i64> {
+    fn deserialize_f64<V: de::Visitor<'de>>(self, visitor: V) -> DecoderResult<V::Value> {
         dec_expect_value!(self);
-        self.try_read("i64")
+        visitor.visit_f64(self.try_read("f64")?)
     }
 
-    fn read_bool(&mut self) -> DecoderResult<bool> {
+    fn deserialize_char<V: de::Visitor<'de>>(self, visitor: V) -> DecoderResult<V::Value> {
         dec_expect_value!(self);
-        self.try_read("bool")
+        visitor.visit_char(self.try_read("char")?)
     }
 
-    fn read_f32(&mut self) -> DecoderResult<f32> {
-        dec_expect_value!(self);
-        self.try_read("f32")
+    fn deserialize_str<V: de::Visitor<'de>>(self, visitor: V) -> DecoderResult<V::Value> {
+        self.deserialize_string(visitor)
     }
 
-    fn read_f64(&mut self) -> DecoderResult<f64> {
-        dec_expect_value!(self);
-        self.try_read("f64")
-    }
-
-    fn read_char(&mut self) -> DecoderResult<char> {
-        dec_expect_value!(self);
-        self.try_read("char")
-    }
-
-    fn read_str(&mut self) -> DecoderResult<String> {
+    fn deserialize_string<V: de::Visitor<'de>>(self, visitor: V) -> DecoderResult<V::Value> {
         if self.expect_key {
             let b = self.keys.pop().unwrap().unwrap();
             match String::from_utf8(b) {
-                Ok(s) => Ok(s),
+                Ok(s) => visitor.visit_string(s),
                 Err(err) => Err(StringEncoding(err.into_bytes()))
             }
         } else {
             let bencode = self.stack.pop();
             match bencode {
                 Some(&Bencode::ByteString(ref v)) => {
-                    String::from_utf8(v.clone()).map_err(|err| StringEncoding(err.into_bytes()))
+                    String::from_utf8(v.clone()
+                    ).map_err(|err| StringEncoding(err.into_bytes())
+                    ).and_then(|v| visitor.visit_string(v)
+                    )
                 }
-                _ => Err(self.error(&format!("Error decoding value as str: {:?}", bencode)))
+                _ => self.error(&format!("Error decoding value as str: {:?}", bencode))
             }
         }
     }
 
-    fn read_enum<T, F>(&mut self, _name: &str, _f: F) -> DecoderResult<T> where F: FnOnce(&mut Decoder<'a>) -> DecoderResult<T> {
-        self.unimplemented("read_enum")
+    fn deserialize_bytes<V: de::Visitor<'de>>(self, _visitor: V) -> DecoderResult<V::Value> {
+        Err(DecoderError::Unimplemented("deserialize_bytes not implemented"))
     }
 
-    fn read_enum_variant<T, F>(&mut self, _names: &[&str], mut _f: F) -> DecoderResult<T> where F: FnMut(&mut Decoder<'a>, usize) -> DecoderResult<T> {
-        self.unimplemented("read_enum_variant")
+    fn deserialize_byte_buf<V: de::Visitor<'de>>(self, _visitor: V) -> DecoderResult<V::Value> {
+        Err(DecoderError::Unimplemented("deserialize_byte_buf not implemented"))
     }
 
-    fn read_enum_variant_arg<T, F>(&mut self, _idx: usize, _f: F) -> DecoderResult<T> where F: FnOnce(&mut Decoder<'a>) -> DecoderResult<T> {
-        self.unimplemented("read_enum_variant_arg")
-    }
-
-    fn read_enum_struct_variant<T, F>(&mut self, _names: &[&str], _f: F) -> DecoderResult<T> where F: FnMut(&mut Decoder<'a>, usize) -> DecoderResult<T> {
-        self.unimplemented("read_enum_struct_variant")
-    }
-
-    fn read_enum_struct_variant_field<T, F>(&mut self, _name: &str, _idx: usize, _f: F) -> DecoderResult<T> where F: FnOnce(&mut Decoder<'a>) -> DecoderResult<T> {
-        self.unimplemented("read_enum_struct_variant_field")
-    }
-
-    fn read_struct<T, F>(&mut self, _name: &str, _len: usize, f: F) -> DecoderResult<T> where F: FnOnce(&mut Decoder<'a>) -> DecoderResult<T> {
-        dec_expect_value!(self);
-        let res = f(self)?;
-        self.stack.pop();
-        Ok(res)
-    }
-
-    fn read_struct_field<T, F>(&mut self, name: &str, _idx: usize, f: F) -> DecoderResult<T> where F: FnOnce(&mut Decoder<'a>) -> DecoderResult<T> {
-        dec_expect_value!(self);
-        let val = match self.stack.last() {
-            Some(v) => {
-                match *v {
-                    &Bencode::Dict(ref m) => {
-                        match m.get(&util::ByteString::from_slice(name.as_bytes())) {
-                            Some(v) => v,
-                            None => &EMPTY
-                        }
-                    }
-                    _ => return Err(Expecting("Dict", format!("{:?}", v)))
-                }
-            }
-            None => return Err(Expecting("Dict", "None".to_string()))
-        };
-        self.stack.push(val);
-        f(self)
-    }
-
-    fn read_tuple<T, F>(&mut self, _tuple_len: usize, _f: F) -> DecoderResult<T> where F: FnOnce(&mut Decoder<'a>) -> DecoderResult<T> {
-        self.unimplemented("read_tuple")
-    }
-
-    fn read_tuple_arg<T, F>(&mut self, _idx: usize, _f: F) -> DecoderResult<T> where F: FnOnce(&mut Decoder<'a>) -> DecoderResult<T> {
-        self.unimplemented("read_tuple_arg")
-    }
-
-    fn read_tuple_struct<T, F>(&mut self, _name: &str, _len: usize, _f: F) -> DecoderResult<T> where F: FnOnce(&mut Decoder<'a>) -> DecoderResult<T> {
-        self.unimplemented("read_tuple_struct")
-    }
-
-    fn read_tuple_struct_arg<T, F>(&mut self, _idx: usize, _f: F) -> DecoderResult<T> where F: FnOnce(&mut Decoder<'a>) -> DecoderResult<T> {
-        self.unimplemented("read_tuple_struct_arg")
-    }
-
-    fn read_option<T, F>(&mut self, mut f: F) -> DecoderResult<T> where F: FnMut(&mut Decoder<'a>, bool) -> DecoderResult<T> {
+    fn deserialize_option<V: de::Visitor<'de>>(self, visitor: V) -> DecoderResult<V::Value> {
         let value = self.stack.pop();
         match value {
-            Some(&Bencode::Empty) => f(self, false),
+            Some(&Bencode::Empty) => visitor.visit_none(),
             Some(&Bencode::ByteString(ref v)) => {
                 if v == b"nil" {
-                    f(self, false)
+                    visitor.visit_none()
                 } else {
                     self.stack.push(value.unwrap());
-                    f(self, true)
+                    visitor.visit_some(self)
                 }
             },
             Some(v) => {
                 self.stack.push(v);
-                f(self, true)
+                visitor.visit_some(self)
             }
             None => return Err(Expecting("Bencode", "None".to_string()))
         }
     }
 
-    fn read_seq<T, F>(&mut self, f: F) -> DecoderResult<T> where F: FnOnce(&mut Decoder<'a>, usize) -> DecoderResult<T> {
+    fn deserialize_unit<V: de::Visitor<'de>>(self, visitor: V) -> DecoderResult<V::Value> {
+        dec_expect_value!(self);  // TODO is it needed?
+        self.try_read("unit")?;
+        visitor.visit_unit()
+    }
+
+    fn deserialize_unit_struct<V: de::Visitor<'de>>(
+        self,
+        _name: &'static str,
+        visitor: V
+    ) -> DecoderResult<V::Value> {
+        self.deserialize_unit(visitor)
+    }
+
+    fn deserialize_enum<V: de::Visitor<'de>>(
+        self,
+        _name: &'static str,
+        _variants: &'static [&'static str],
+        _visitor: V
+    ) -> DecoderResult<V::Value> {
+        self.unimplemented("deserialize_enum")
+    }
+    
+    fn deserialize_struct<V: de::Visitor<'de>>(
+        self,
+        _name: &'static str,
+        _fields: &'static [&'static str],
+        visitor: V
+    ) -> DecoderResult<V::Value> {
         dec_expect_value!(self);
-        let len = match self.stack.pop() {
+        self.deserialize_map(visitor)
+    }
+
+    fn deserialize_newtype_struct<V: de::Visitor<'de>>(
+        self,
+        _name: &'static str,
+        _visitor: V
+    ) -> DecoderResult<V::Value> {
+        self.unimplemented("deserialize_newtype_struct")
+    }
+
+    fn deserialize_seq<V: de::Visitor<'de>>(self, visitor: V) -> DecoderResult<V::Value> {
+        dec_expect_value!(self);
+        match self.stack.pop() {
             Some(&Bencode::List(ref list)) => {
-                for v in list.iter().rev() {
-                    self.stack.push(v);
-                }
-                list.len()
+                visitor.visit_seq(SeqDeserializer {
+                    vals: list.iter(),
+                })
             }
-            val => return Err(Expecting("List", val.map(|v| v.to_string()).unwrap_or("".to_string())))
-        };
-        f(self, len)
+            val => Err(Expecting("List", val.map(|v| v.to_string()).unwrap_or("".to_string())))
+        }
     }
 
-    fn read_seq_elt<T, F>(&mut self, _idx: usize, f: F) -> DecoderResult<T> where F: FnOnce(&mut Decoder<'a>) -> DecoderResult<T> {
-        dec_expect_value!(self);
-        f(self)
+    fn deserialize_tuple<V: de::Visitor<'de>>(
+        self,
+        _len: usize,
+        _visitor: V
+    ) -> DecoderResult<V::Value> {
+        self.unimplemented("deserialize_tuple")
     }
 
-    fn read_map<T, F>(&mut self, f: F) -> DecoderResult<T> where F: FnOnce(&mut Decoder<'a>, usize) -> DecoderResult<T> {
+    fn deserialize_tuple_struct<V: de::Visitor<'de>>(
+        self,
+        _name: &'static str,
+        _len: usize,
+        _visitor: V
+    ) -> DecoderResult<V::Value> {
+        self.unimplemented("deserialize_tuple_struct")
+    }
+
+    fn deserialize_map<V: de::Visitor<'de>>(
+        self,
+        visitor: V
+    ) -> DecoderResult<V::Value> {
         dec_expect_value!(self);
-        let len = match self.stack.pop() {
+        let mut keys = vec![];
+        let mut vals = vec![];
+        match self.stack.pop() {
             Some(&Bencode::Dict(ref m)) => {
                 for (key, value) in m.iter() {
-                    self.keys.push(key.clone());
-                    self.stack.push(value);
+                    keys.push(key.clone());  // Zero copy?
+                    vals.push(value);
                 }
-                m.len()
+                visitor.visit_map(MapDeserializer {
+                    keys: keys.into_iter(),
+                    vals: vals.into_iter()
+                })
             }
-            val => return Err(Expecting("Dict", val.map(|v| v.to_string()).unwrap_or("".to_string())))
-        };
-        f(self, len)
+            val => Err(Expecting("Dict", val.map(|v| v.to_string()).unwrap_or("".to_string())))
+        }
+    }
+    
+    fn deserialize_identifier<V: de::Visitor<'de>>(self, visitor: V) -> DecoderResult<V::Value> {
+        self.deserialize_string(visitor)
     }
 
-    fn read_map_elt_key<T, F>(&mut self, _idx: usize, f: F) -> DecoderResult<T> where F: FnOnce(&mut Decoder<'a>) -> DecoderResult<T> {
-        dec_expect_value!(self);
-        self.expect_key = true;
-        let res = f(self)?;
-        self.expect_key = false;
-        Ok(res)
+    fn deserialize_ignored_any<V: de::Visitor<'de>>(self, _visitor: V) -> DecoderResult<V::Value> {
+        self.unimplemented("deserialize_ignored_any")
+    }
+}
+
+struct MapDeserializer<'de> {
+    keys: std::vec::IntoIter<util::ByteString>,
+    vals: std::vec::IntoIter<&'de Bencode>,
+}
+
+impl<'de> de::MapAccess<'de> for MapDeserializer<'de> {
+    type Error = DecoderError;
+
+    fn next_key_seed<K>(&mut self, seed: K) -> Result<Option<K::Value>, Self::Error> where
+        K: de::DeserializeSeed<'de> {
+        if let Some(key) = self.keys.next() {
+            seed.deserialize(&mut Decoder {
+                keys: vec![key],
+                // TODO It should be the only place where expect_key
+                // is true; instead of checking this flag everywhere
+                // in Decoder, introduce special limited decoder type
+                // as in other Serde libraries (json, avro to name a
+                // few).  And remove expect_key and all checks!
+                expect_key: true,
+                stack: vec![],
+            }).map(Some)
+        } else {
+            Ok(None)
+        }
     }
 
-    fn read_map_elt_val<T, F>(&mut self, _idx: usize, f: F) -> DecoderResult<T> where F: FnOnce(&mut Decoder<'a>) -> DecoderResult<T> {
-        dec_expect_value!(self);
-        f(self)
+    fn next_value_seed<V>(&mut self, seed: V) -> Result<V::Value, Self::Error> where
+        V: de::DeserializeSeed<'de> {
+        seed.deserialize(&mut Decoder {
+            keys: vec![],
+            expect_key: false,
+            // We use there unwrap because length of vals is equal to length of keys,
+            // and sane client code calls next_value_seed only if next_key_seed
+            // returns Some.  It is definitely true for autogenerated code, but not
+            // for manual code.
+            stack: vec![self.vals.next().unwrap()]
+        })
+    }
+}
+
+struct SeqDeserializer<'de> {
+    vals: std::slice::Iter<'de, Bencode>,
+}
+
+impl<'de> de::SeqAccess<'de> for SeqDeserializer<'de> {
+    type Error = DecoderError;
+
+    fn next_element_seed<V>(&mut self, seed: V) -> Result<Option<V::Value>, Self::Error> where
+        V: de::DeserializeSeed<'de> {
+        match self.vals.next() {
+            Some(val) =>
+                seed.deserialize(&mut Decoder {
+                    keys: vec![],
+                    expect_key: false,
+                    // We use there unwrap because length of vals is equal to length of keys,
+                    // and sane client code calls next_value_seed only if next_key_seed
+                    // returns Some.  It is definitely true for autogenerated code, but not
+                    // for manual code.
+                    stack: vec![val]
+                }).map(Some),
+            None => Ok(None)
+        }
     }
 }
 
@@ -1322,7 +1503,7 @@ mod tests {
     use std::collections::BTreeMap;
     use std::collections::HashMap;
 
-    use rustc_serialize::Decodable;
+    use serde::{Deserialize, Serialize};
 
     use streaming::Error;
     use streaming::BencodeEvent;
@@ -1346,7 +1527,7 @@ mod tests {
     macro_rules! assert_decoding(($enc:expr, $value:expr) => ({
         let bencode = super::from_vec($enc).unwrap();
         let mut decoder = Decoder::new(&bencode);
-        let result = Decodable::decode(&mut decoder);
+        let result = Deserialize::deserialize(&mut decoder);
         assert_eq!(Ok($value), result);
     }));
 
@@ -1375,7 +1556,7 @@ mod tests {
         };
         let bencode = super::from_vec(encoded).unwrap();
         let mut decoder = Decoder::new(&bencode);
-        let result = Decodable::decode(&mut decoder);
+        let result = Deserialize::deserialize(&mut decoder);
         assert_eq!(Ok(value), result);
     }));
 
@@ -1697,20 +1878,20 @@ mod tests {
                        identity_nested_vec,
                        (vec![vec![1isize], vec![2isize, 3isize], vec![]]) -> bytes("lli1eeli2ei3eelee"));
 
-    #[derive(Eq, PartialEq, Debug, RustcEncodable, RustcDecodable)]
+    #[derive(Eq, PartialEq, Debug, Serialize, Deserialize)]
     struct SimpleStruct {
         a: usize,
         b: Vec<String>,
     }
 
-    #[derive(Eq, PartialEq, Debug, RustcEncodable, RustcDecodable)]
+    #[derive(Eq, PartialEq, Debug, Serialize, Deserialize)]
     struct InnerStruct {
         field_one: (),
         list: Vec<usize>,
         abc: String
     }
 
-    #[derive(Eq, PartialEq, Debug, RustcEncodable, RustcDecodable)]
+    #[derive(Eq, PartialEq, Debug, Serialize, Deserialize)]
     struct OuterStruct {
         inner: Vec<InnerStruct>,
         is_true: bool
@@ -1781,7 +1962,7 @@ mod tests {
     fn decode_error_on_wrong_map_key_type() {
         let benc = Bencode::Dict(map!(BTreeMap, (util::ByteString::from_vec(bytes("foo")), Bencode::ByteString(bytes("bar")))));
         let mut decoder = Decoder::new(&benc);
-        let res: DecoderResult<BTreeMap<isize, String>> = Decodable::decode(&mut decoder);
+        let res: DecoderResult<BTreeMap<isize, String>> = Deserialize::deserialize(&mut decoder);
         assert!(res.is_err());
     }
 
@@ -1794,7 +1975,7 @@ mod tests {
 
     #[test]
     fn encodes_struct_fields_in_sorted_order() {
-        #[derive(RustcEncodable)]
+        #[derive(Serialize)]
         struct OrderedStruct {
             z: isize,
             a: isize,
@@ -1810,14 +1991,14 @@ mod tests {
         assert_eq!(encode(&s).unwrap(), bytes("d1:ai1e2:aai2e2:abi3e1:zi4ee"));
     }
 
-    #[derive(RustcEncodable, RustcDecodable, Eq, PartialEq, Debug, Clone)]
+    #[derive(Serialize, Deserialize, Eq, PartialEq, Debug, Clone)]
     struct OptionalStruct {
         a: Option<isize>,
         b: isize,
         c: Option<Vec<Option<bool>>>,
     }
 
-    #[derive(RustcEncodable, RustcDecodable, Eq, PartialEq, Debug)]
+    #[derive(Serialize, Deserialize, Eq, PartialEq, Debug)]
     struct OptionalStructOuter {
         a: Option<OptionalStruct>,
         b: Option<isize>,
@@ -2055,7 +2236,7 @@ mod bench {
 
     use self::test::{Bencher, black_box};
 
-    use rustc_serialize::{Encodable, Decodable};
+    use serde::{Serialize, Deserialize};
 
     use streaming::StreamingParser;
     use super::{Encoder, Decoder, Parser, DecoderResult, encode};
@@ -2067,7 +2248,7 @@ mod bench {
             let mut w = Vec::with_capacity(v.len() * 10);
             {
                 let mut enc = Encoder::new(&mut w);
-                let _ = v.encode(&mut enc);
+                let _ = v.serialize(&mut enc);
             }
             black_box(w)
         });
@@ -2084,7 +2265,7 @@ mod bench {
             let mut parser = Parser::new(streaming_parser);
             let bencode = parser.parse().unwrap();
             let mut decoder = Decoder::new(&bencode);
-            let result: DecoderResult<Vec<usize>> = Decodable::decode(&mut decoder);
+            let result: DecoderResult<Vec<usize>> = Deserialize::deserialize(&mut decoder);
             result
         });
         bh.bytes = b.len() as u64 * 4;

@@ -1,9 +1,9 @@
 use std::{str, fmt};
 use std::borrow::Borrow;
 
-use rustc_serialize as serialize;
-use rustc_serialize::Encodable;
+use serde::{self, Serialize};
 
+// TODO: use bstr
 #[derive(Eq, PartialEq, Clone, Ord, PartialOrd, Hash, Debug)]
 pub struct ByteString(Vec<u8>);
 
@@ -41,10 +41,10 @@ impl fmt::Display for ByteString {
     }
 }
 
-impl Encodable for ByteString {
-    fn encode<S: serialize::Encoder>(&self, e: &mut S) -> Result<(), S::Error> {
+impl Serialize for ByteString {
+    fn serialize<S: serde::Serializer>(&self, e: S) -> Result<S::Ok, S::Error> {
         let &ByteString(ref key) = self;
-        e.emit_str(unsafe { str::from_utf8_unchecked(&key[..]) })
+        e.serialize_str(unsafe { str::from_utf8_unchecked(&key[..]) })
     }
 }
 
