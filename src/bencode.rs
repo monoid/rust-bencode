@@ -209,7 +209,7 @@ use std::str::{self, Utf8Error};
 use std::vec::Vec;
 use std::mem::size_of;
 
-use serde::{de, ser, Serialize};
+use serde::{de, ser, Serialize, forward_to_deserialize_any};
 
 use byteorder::{ReadBytesExt, WriteBytesExt, BigEndian};
 use num_traits::FromPrimitive;
@@ -1148,12 +1148,6 @@ impl<T: Iterator<Item=BencodeEvent>> Parser<T> {
     }
 }
 
-macro_rules! dec_expect_value(($slf:expr) => {
-    if $slf.expect_key {
-        return Err(Message("Only 'string' map keys allowed".to_string()))
-    }
-});
-
 #[derive(Eq, PartialEq, Clone, Debug)]
 pub enum DecoderError {
     Message(String),
@@ -1181,16 +1175,12 @@ impl de::Error for DecoderError {
 pub type DecoderResult<T> = Result<T, DecoderError>;
 
 pub struct Decoder<'de> {
-    keys: Vec<util::ByteString>,
-    expect_key: bool,
     stack: Vec<&'de Bencode>,
 }
 
 impl<'de> Decoder<'de> {
     pub fn new(bencode: &'de Bencode) -> Decoder<'de> {
         Decoder {
-            keys: Vec::new(),
-            expect_key: false,
             stack: vec![bencode],
         }
     }
@@ -1220,62 +1210,50 @@ impl<'de, 'a> serde::Deserializer<'de> for &'a mut Decoder<'de> {
     }
 
     fn deserialize_bool<V: de::Visitor<'de>>(self, visitor: V) -> DecoderResult<V::Value> {
-        dec_expect_value!(self);
         visitor.visit_bool(self.try_read("bool")?)
     }
 
     fn deserialize_u8<V: de::Visitor<'de>>(self, visitor: V) -> DecoderResult<V::Value> {
-        dec_expect_value!(self);
         visitor.visit_u8(self.try_read("u8")?)
     }
 
     fn deserialize_u16<V: de::Visitor<'de>>(self, visitor: V) -> DecoderResult<V::Value> {
-        dec_expect_value!(self);
         visitor.visit_u16(self.try_read("u16")?)
     }
 
     fn deserialize_u32<V: de::Visitor<'de>>(self, visitor: V) -> DecoderResult<V::Value> {
-        dec_expect_value!(self);
         visitor.visit_u32(self.try_read("u32")?)
     }
 
     fn deserialize_u64<V: de::Visitor<'de>>(self, visitor: V) -> DecoderResult<V::Value> {
-        dec_expect_value!(self);
         visitor.visit_u64(self.try_read("u64")?)
     }
 
     fn deserialize_i8<V: de::Visitor<'de>>(self, visitor: V) -> DecoderResult<V::Value> {
-        dec_expect_value!(self);
         visitor.visit_i8(self.try_read("i8")?)
     }
 
     fn deserialize_i16<V: de::Visitor<'de>>(self, visitor: V) -> DecoderResult<V::Value> {
-        dec_expect_value!(self);
         visitor.visit_i16(self.try_read("i16")?)
     }
 
     fn deserialize_i32<V: de::Visitor<'de>>(self, visitor: V) -> DecoderResult<V::Value> {
-        dec_expect_value!(self);
         visitor.visit_i32(self.try_read("i32")?)
     }
 
     fn deserialize_i64<V: de::Visitor<'de>>(self, visitor: V) -> DecoderResult<V::Value> {
-        dec_expect_value!(self);
         visitor.visit_i64(self.try_read("i64")?)
     }
 
     fn deserialize_f32<V: de::Visitor<'de>>(self, visitor: V) -> DecoderResult<V::Value> {
-        dec_expect_value!(self);
         visitor.visit_f32(self.try_read("f32")?)
     }
 
     fn deserialize_f64<V: de::Visitor<'de>>(self, visitor: V) -> DecoderResult<V::Value> {
-        dec_expect_value!(self);
         visitor.visit_f64(self.try_read("f64")?)
     }
 
     fn deserialize_char<V: de::Visitor<'de>>(self, visitor: V) -> DecoderResult<V::Value> {
-        dec_expect_value!(self);
         visitor.visit_char(self.try_read("char")?)
     }
 
@@ -1284,23 +1262,15 @@ impl<'de, 'a> serde::Deserializer<'de> for &'a mut Decoder<'de> {
     }
 
     fn deserialize_string<V: de::Visitor<'de>>(self, visitor: V) -> DecoderResult<V::Value> {
-        if self.expect_key {
-            let b = self.keys.pop().unwrap().unwrap();
-            match String::from_utf8(b) {
-                Ok(s) => visitor.visit_string(s),
-                Err(err) => Err(StringEncoding(err.into_bytes()))
+        let bencode = self.stack.pop();
+        match bencode {
+            Some(&Bencode::ByteString(ref v)) => {
+                String::from_utf8(v.clone()
+                ).map_err(|err| StringEncoding(err.into_bytes())
+                ).and_then(|v| visitor.visit_string(v)
+                )
             }
-        } else {
-            let bencode = self.stack.pop();
-            match bencode {
-                Some(&Bencode::ByteString(ref v)) => {
-                    String::from_utf8(v.clone()
-                    ).map_err(|err| StringEncoding(err.into_bytes())
-                    ).and_then(|v| visitor.visit_string(v)
-                    )
-                }
-                _ => self.error(&format!("Error decoding value as str: {:?}", bencode))
-            }
+            _ => self.error(&format!("Error decoding value as str: {:?}", bencode))
         }
     }
 
@@ -1333,7 +1303,6 @@ impl<'de, 'a> serde::Deserializer<'de> for &'a mut Decoder<'de> {
     }
 
     fn deserialize_unit<V: de::Visitor<'de>>(self, visitor: V) -> DecoderResult<V::Value> {
-        dec_expect_value!(self);  // TODO is it needed?
         self.try_read("unit")?;
         visitor.visit_unit()
     }
@@ -1361,7 +1330,6 @@ impl<'de, 'a> serde::Deserializer<'de> for &'a mut Decoder<'de> {
         _fields: &'static [&'static str],
         visitor: V
     ) -> DecoderResult<V::Value> {
-        dec_expect_value!(self);
         self.deserialize_map(visitor)
     }
 
@@ -1374,7 +1342,6 @@ impl<'de, 'a> serde::Deserializer<'de> for &'a mut Decoder<'de> {
     }
 
     fn deserialize_seq<V: de::Visitor<'de>>(self, visitor: V) -> DecoderResult<V::Value> {
-        dec_expect_value!(self);
         match self.stack.pop() {
             Some(&Bencode::List(ref list)) => {
                 visitor.visit_seq(SeqDeserializer {
@@ -1406,18 +1373,11 @@ impl<'de, 'a> serde::Deserializer<'de> for &'a mut Decoder<'de> {
         self,
         visitor: V
     ) -> DecoderResult<V::Value> {
-        dec_expect_value!(self);
-        let mut keys = vec![];
-        let mut vals = vec![];
         match self.stack.pop() {
             Some(&Bencode::Dict(ref m)) => {
-                for (key, value) in m.iter() {
-                    keys.push(key.clone());  // Zero copy?
-                    vals.push(value);
-                }
                 visitor.visit_map(MapDeserializer {
-                    keys: keys.into_iter(),
-                    vals: vals.into_iter()
+                    keys: m.keys(),
+                    vals: m.values()
                 })
             }
             val => Err(Expecting("Dict", val.map(|v| v.to_string()).unwrap_or("".to_string())))
@@ -1434,8 +1394,8 @@ impl<'de, 'a> serde::Deserializer<'de> for &'a mut Decoder<'de> {
 }
 
 struct MapDeserializer<'de> {
-    keys: std::vec::IntoIter<util::ByteString>,
-    vals: std::vec::IntoIter<&'de Bencode>,
+    keys: std::collections::btree_map::Keys<'de, util::ByteString, Bencode>,
+    vals: std::collections::btree_map::Values<'de, util::ByteString, Bencode>,
 }
 
 impl<'de> de::MapAccess<'de> for MapDeserializer<'de> {
@@ -1444,15 +1404,8 @@ impl<'de> de::MapAccess<'de> for MapDeserializer<'de> {
     fn next_key_seed<K>(&mut self, seed: K) -> Result<Option<K::Value>, Self::Error> where
         K: de::DeserializeSeed<'de> {
         if let Some(key) = self.keys.next() {
-            seed.deserialize(&mut Decoder {
-                keys: vec![key],
-                // TODO It should be the only place where expect_key
-                // is true; instead of checking this flag everywhere
-                // in Decoder, introduce special limited decoder type
-                // as in other Serde libraries (json, avro to name a
-                // few).  And remove expect_key and all checks!
-                expect_key: true,
-                stack: vec![],
+            seed.deserialize(KeyDeserializer {
+                key,
             }).map(Some)
         } else {
             Ok(None)
@@ -1462,8 +1415,6 @@ impl<'de> de::MapAccess<'de> for MapDeserializer<'de> {
     fn next_value_seed<V>(&mut self, seed: V) -> Result<V::Value, Self::Error> where
         V: de::DeserializeSeed<'de> {
         seed.deserialize(&mut Decoder {
-            keys: vec![],
-            expect_key: false,
             // We use there unwrap because length of vals is equal to length of keys,
             // and sane client code calls next_value_seed only if next_key_seed
             // returns Some.  It is definitely true for autogenerated code, but not
@@ -1485,8 +1436,6 @@ impl<'de> de::SeqAccess<'de> for SeqDeserializer<'de> {
         match self.vals.next() {
             Some(val) =>
                 seed.deserialize(&mut Decoder {
-                    keys: vec![],
-                    expect_key: false,
                     // We use there unwrap because length of vals is equal to length of keys,
                     // and sane client code calls next_value_seed only if next_key_seed
                     // returns Some.  It is definitely true for autogenerated code, but not
@@ -1495,6 +1444,35 @@ impl<'de> de::SeqAccess<'de> for SeqDeserializer<'de> {
                 }).map(Some),
             None => Ok(None)
         }
+    }
+}
+
+struct KeyDeserializer<'de> {
+    key: &'de util::ByteString,
+}
+
+impl<'de> serde::Deserializer<'de> for KeyDeserializer<'de> {
+    type Error = DecoderError;
+
+    fn deserialize_any<V: de::Visitor<'de>>(self, visitor: V) -> DecoderResult<V::Value> {
+        match String::from_utf8(self.key.as_slice().to_vec()) {
+            Ok(s) => visitor.visit_string(s),
+            Err(err) => Err(StringEncoding(err.into_bytes()))
+        }
+    }
+
+    fn deserialize_option<V>(self, visitor: V) -> DecoderResult<V::Value>
+    where
+        V: de::Visitor<'de>,
+    {
+        // Map keys cannot be null.
+        visitor.visit_some(self)
+    }
+
+    forward_to_deserialize_any! {
+        bool i8 i16 i32 i64 u8 u16 u32 u64 bytes byte_buf newtype_struct enum
+        f32 f64 char str string unit unit_struct seq tuple tuple_struct map
+        struct identifier ignored_any
     }
 }
 
