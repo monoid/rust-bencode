@@ -1,7 +1,7 @@
 [package]
 
 name = "bencode"
-version = "0.1.16"
+version = "1.0.0"
 authors = ["Arjan Topolovec <arjan.top@gmail.com>"]
 license = "MIT/Apache-2.0"
 homepage = "https://github.com/arjantop/rust-bencode"
@@ -22,4 +22,5 @@ name = "bencode"
 
 byteorder = "1.0"
 num-traits = "0.1"
-serde = { version = "1.0", features = ["derive"] }  # TODO derive is only in the tests
+# derive is needed only in tests, but cargo doesn't support features only for tests
+serde = { version = "1.0", features = ["derive"] }
