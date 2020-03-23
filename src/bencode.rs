@@ -778,9 +778,9 @@ impl<'a, W: io::Write> serde::Serializer for &'a mut Encoder<W> {
     type Ok = ();
     type Error = SerializeErr;
     type SerializeSeq = Self;
-    type SerializeTuple = Self;
     type SerializeMap = SerializeMap<'a, W>;
     type SerializeStruct = SerializeStruct<'a, W>;
+    type SerializeTuple = ser::Impossible<Self::Ok, Self::Error>;
     type SerializeTupleStruct = ser::Impossible<Self::Ok, Self::Error>;
     type SerializeTupleVariant = ser::Impossible<Self::Ok, Self::Error>;
     type SerializeStructVariant = ser::Impossible<Self::Ok, Self::Error>;
@@ -934,19 +934,6 @@ impl<W: io::Write> ser::SerializeSeq for &mut Encoder<W> {
     fn end(self) -> EncoderResult<()> {
         self.is_none = false;
         Ok(write!(self.writer, "e")?)
-    }
-}
-
-impl<W: io::Write> ser::SerializeTuple for &mut Encoder<W> {
-    type Ok = ();
-    type Error = SerializeErr;
-
-    fn serialize_element<T: serde::Serialize + ?Sized>(&mut self, _elt: &T) -> EncoderResult<()> {
-        self.error("serialize_tuple not implemented")
-    }
-
-    fn end(self) -> Result<Self::Ok, Self::Error> {
-        self.error("serialize_tuple not implemented")
     }
 }
 
