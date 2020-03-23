@@ -705,8 +705,6 @@ pub fn encode<T: serde::Serialize>(t: T) -> EncoderResult<Vec<u8>> {
 pub struct Encoder<W: io::Write> {
     writer: W,
     writers: Vec<Vec<u8>>,
-    expect_key: bool,
-    keys: Vec<util::ByteString>,
     is_none: bool,
     stack: Vec<BTreeMap<util::ByteString, Vec<u8>>>,
 }
@@ -716,8 +714,6 @@ impl<W: io::Write> Encoder<W> {
         Encoder {
             writer: writer,
             writers: Vec::new(),
-            expect_key: false,
-            keys: Vec::new(),
             is_none: false,
             stack: Vec::new()
         }
@@ -754,25 +750,14 @@ impl<W: io::Write> Encoder<W> {
     }
 
     fn encode_bytestring(&mut self, v: &[u8]) -> EncoderResult<()> {
-        if self.expect_key {
-            self.keys.push(util::ByteString::from_slice(v));
-            Ok(())
-        } else {
-            write!(self.get_writer(), "{}:", v.len())?;
-            Ok(self.get_writer().write_all(v)?)
-        }
+        write!(self.get_writer(), "{}:", v.len())?;
+        Ok(self.get_writer().write_all(v)?)
     }
 
     fn error<T>(&mut self, msg: &'static str) -> EncoderResult<T> {
         Err(io::Error::new(io::ErrorKind::InvalidInput, msg).into())
     }
 }
-
-macro_rules! expect_value(($slf:expr) => {
-    if $slf.expect_key {
-        return $slf.error("Only 'string' map keys allowed");
-    }
-});
 
 
 #[derive(Debug)]
@@ -809,52 +794,46 @@ impl<'a, W: io::Write> serde::Serializer for &'a mut Encoder<W> {
     type Error = SerializeErr;
     type SerializeSeq = Self;
     type SerializeTuple = Self;
-    type SerializeMap = Self;
+    type SerializeMap = SerializeMap<'a, W>;
     type SerializeStruct = Self;
-    type SerializeTupleStruct = ser::Impossible<(), Self::Error>;
-    type SerializeTupleVariant = ser::Impossible<(), Self::Error>;
-    type SerializeStructVariant = ser::Impossible<(), Self::Error>;
+    type SerializeTupleStruct = ser::Impossible<Self::Ok, Self::Error>;
+    type SerializeTupleVariant = ser::Impossible<Self::Ok, Self::Error>;
+    type SerializeStructVariant = ser::Impossible<Self::Ok, Self::Error>;
 
-    fn serialize_unit(self) -> EncoderResult<()> {
-        expect_value!(self);
+    fn serialize_unit(self) -> EncoderResult<Self::Ok> {
         Ok(write!(self.get_writer(), "0:")?)
     }
 
     fn serialize_none(self) -> EncoderResult<()> {
-        expect_value!(self);
         self.is_none = true;
         Ok(write!(self.get_writer(), "3:nil")?)
     }
 
-    fn serialize_some<T: ?Sized + serde::Serialize>(self, value: &T) -> EncoderResult<()> {
-        expect_value!(self);
+    fn serialize_some<T: ?Sized + serde::Serialize>(self, value: &T) -> EncoderResult<Self::Ok> {
         value.serialize(self)
     }
 
-    fn serialize_u8(self, v: u8) -> EncoderResult<()> { self.serialize_i64(v as i64) }
+    fn serialize_u8(self, v: u8) -> EncoderResult<Self::Ok> { self.serialize_i64(v as i64) }
 
-    fn serialize_u16(self, v: u16) -> EncoderResult<()> { self.serialize_i64(v as i64) }
+    fn serialize_u16(self, v: u16) -> EncoderResult<Self::Ok> { self.serialize_i64(v as i64) }
 
-    fn serialize_u32(self, v: u32) -> EncoderResult<()> { self.serialize_i64(v as i64) }
+    fn serialize_u32(self, v: u32) -> EncoderResult<Self::Ok> { self.serialize_i64(v as i64) }
 
-    fn serialize_u64(self, v: u64) -> EncoderResult<()> {
-        expect_value!(self);
+    fn serialize_u64(self, v: u64) -> EncoderResult<Self::Ok> {
         Ok(write!(self.get_writer(), "i{}e", v)?)
     }
 
-    fn serialize_i8(self, v: i8) -> EncoderResult<()> { self.serialize_i64(v as i64) }
+    fn serialize_i8(self, v: i8) -> EncoderResult<Self::Ok> { self.serialize_i64(v as i64) }
 
-    fn serialize_i16(self, v: i16) -> EncoderResult<()> { self.serialize_i64(v as i64) }
+    fn serialize_i16(self, v: i16) -> EncoderResult<Self::Ok> { self.serialize_i64(v as i64) }
 
-    fn serialize_i32(self, v: i32) -> EncoderResult<()> { self.serialize_i64(v as i64) }
+    fn serialize_i32(self, v: i32) -> EncoderResult<Self::Ok> { self.serialize_i64(v as i64) }
 
-    fn serialize_i64(self, v: i64) -> EncoderResult<()> {
-        expect_value!(self);
+    fn serialize_i64(self, v: i64) -> EncoderResult<Self::Ok> {
         Ok(write!(self.get_writer(), "i{}e", v)?)
     }
 
-    fn serialize_bool(self, v: bool) -> EncoderResult<()> {
-        expect_value!(self);
+    fn serialize_bool(self, v: bool) -> EncoderResult<Self::Ok> {
         if v {
             self.serialize_str("true")
         } else {
@@ -862,26 +841,23 @@ impl<'a, W: io::Write> serde::Serializer for &'a mut Encoder<W> {
         }
     }
 
-    fn serialize_f32(self, v: f32) -> EncoderResult<()> {
-        expect_value!(self);
-        let mut buf = vec![];
+    fn serialize_f32(self, v: f32) -> EncoderResult<Self::Ok> {
+        let mut buf = Vec::with_capacity(4);
         buf.write_f32::<BigEndian>(v).unwrap();
         self.encode_bytestring(&buf[..])
     }
 
-    fn serialize_f64(self, v: f64) -> EncoderResult<()> {
-        expect_value!(self);
-        let mut buf = vec![];
+    fn serialize_f64(self, v: f64) -> EncoderResult<Self::Ok> {
+        let mut buf = Vec::with_capacity(8);
         buf.write_f64::<BigEndian>(v).unwrap();
         self.encode_bytestring(&buf[..])
     }
 
-    fn serialize_char(self, v: char) -> EncoderResult<()> {
-        expect_value!(self);
+    fn serialize_char(self, v: char) -> EncoderResult<Self::Ok> {
         self.encode_bytestring(&v.to_string().as_bytes())
     }
 
-    fn serialize_str(self, v: &str) -> EncoderResult<()> {
+    fn serialize_str(self, v: &str) -> EncoderResult<Self::Ok> {
         self.encode_bytestring(v.as_bytes())
     }
 
@@ -890,30 +866,28 @@ impl<'a, W: io::Write> serde::Serializer for &'a mut Encoder<W> {
         _name: &'static str,
         _variant_index: u32,
         _variant: &'static str,
-        _value: &T) -> EncoderResult<()> {
+        _value: &T) -> EncoderResult<Self::Ok> {
         self.error("serialize_newtype_variant not implemented")
     }
 
-    fn serialize_bytes(self, v: &[u8]) -> EncoderResult<()> {
+    fn serialize_bytes(self, v: &[u8]) -> EncoderResult<Self::Ok> {
         self.encode_bytestring(v)
     }
 
-    fn serialize_seq(self, _len: Option<usize>) -> EncoderResult<Self> {
-        expect_value!(self);
+    fn serialize_seq(self, _len: Option<usize>) -> EncoderResult<Self::SerializeSeq> {
         write!(self.get_writer(), "l")?;  // SerializeSeq::end will write "e"
         Ok(self)
     }
 
-    fn serialize_tuple(self, _len: usize) -> EncoderResult<Self> {
+    fn serialize_tuple(self, _len: usize) -> EncoderResult<Self::SerializeTuple> {
         self.error("serialize_tuple not implemented")
     }
 
-    fn serialize_map(self, _size: Option<usize>) -> EncoderResult<Self> {
-        expect_value!(self);
+    fn serialize_map(self, _size: Option<usize>) -> EncoderResult<Self::SerializeMap> {
         // bencode requires keys to be sorted, thus we store key-values into btree.
         // TODO: hash+sort can be more efficient than btree.
         self.stack.push(BTreeMap::new());
-        Ok(self)
+        Ok(SerializeMap::new(self))
     }
 
     fn serialize_tuple_struct(self, _name: &'static str, _len: usize)
@@ -930,14 +904,14 @@ impl<'a, W: io::Write> serde::Serializer for &'a mut Encoder<W> {
         self.error("serialize_tuple_variant not implemented")
     }
 
-    fn serialize_unit_struct(self, _name: &'static str) -> Result<Self::Ok, Self::Error> {
+    fn serialize_unit_struct(self, _name: &'static str) -> EncoderResult<Self::Ok> {
         self.serialize_unit()
     }
 
     fn serialize_unit_variant(self,
                               _name: &'static str,
                               _variant_index: u32,
-                              _variant: &'static str) -> Result<Self::Ok, Self::Error> {
+                              _variant: &'static str) -> EncoderResult<Self::Ok> {
         self.error("serialize_unit_variant not implemented")
     }
 
@@ -946,7 +920,7 @@ impl<'a, W: io::Write> serde::Serializer for &'a mut Encoder<W> {
                                 _variant_index: u32,
                                 _variant: &'static str,
                                 _len: usize,
-    ) -> Result<Self::SerializeStructVariant, Self::Error> {
+    ) -> EncoderResult<Self::SerializeStructVariant> {
         self.error("serialize_struct_variant not implemented")
     }
 
@@ -954,7 +928,7 @@ impl<'a, W: io::Write> serde::Serializer for &'a mut Encoder<W> {
         self,
         _name: &'static str,
         value: &T
-    ) -> Result<Self::Ok, Self::Error> {
+    ) -> EncoderResult<Self::Ok> {
         value.serialize(self)
     }
 
@@ -962,8 +936,7 @@ impl<'a, W: io::Write> serde::Serializer for &'a mut Encoder<W> {
         self,
         _name: &'static str,
         _len: usize
-    ) -> Result<Self, Self::Error> {
-        expect_value!(self);
+    ) -> EncoderResult<Self::SerializeStruct> {
         // We serialize struct as a map {field_name: value}.
         self.stack.push(BTreeMap::new());
         Ok(self)
@@ -998,41 +971,207 @@ impl<W: io::Write> ser::SerializeTuple for &mut Encoder<W> {
     }
 }
 
-impl<W: io::Write> ser::SerializeMap for &mut Encoder<W> {
+struct SerializeKey ();
+
+impl SerializeKey {
+    fn expect_string<T>(self) -> EncoderResult<T> {
+        Err(io::Error::new(io::ErrorKind::InvalidInput, "Only 'string' map keys allowed").into())
+    }
+}
+
+impl ser::Serializer for SerializeKey {
+    type Ok = util::ByteString;
+    type Error = SerializeErr;
+    type SerializeSeq = ser::Impossible<Self::Ok, Self::Error>;
+    type SerializeTuple = ser::Impossible<Self::Ok, Self::Error>;
+    type SerializeMap = ser::Impossible<Self::Ok, Self::Error>;
+    type SerializeStruct = ser::Impossible<Self::Ok, Self::Error>;
+    type SerializeTupleStruct = ser::Impossible<Self::Ok, Self::Error>;
+    type SerializeTupleVariant = ser::Impossible<Self::Ok, Self::Error>;
+    type SerializeStructVariant = ser::Impossible<Self::Ok, Self::Error>;
+
+    fn serialize_str(self, v: &str) -> EncoderResult<Self::Ok> {
+        self.serialize_bytes(v.as_bytes())
+    }
+
+    fn serialize_bytes(self, v: &[u8]) -> EncoderResult<Self::Ok> {
+        Ok(util::ByteString::from_slice(v))
+    }
+
+    fn serialize_unit(self) -> EncoderResult<Self::Ok> {
+        self.expect_string()
+    }
+
+    fn serialize_none(self) -> EncoderResult<Self::Ok> {
+        self.expect_string()
+    }
+
+    fn serialize_some<T: ?Sized + serde::Serialize>(self, _value: &T) -> EncoderResult<Self::Ok> {
+        self.expect_string()
+    }
+
+    fn serialize_u8(self, _v: u8) -> EncoderResult<Self::Ok> {
+        self.expect_string()
+    }
+
+    fn serialize_u16(self, _v: u16) -> EncoderResult<Self::Ok> {
+        self.expect_string()
+    }
+
+    fn serialize_u32(self, _v: u32) -> EncoderResult<Self::Ok> {
+        self.expect_string()
+    }
+
+    fn serialize_u64(self, _v: u64) -> EncoderResult<Self::Ok> {
+        self.expect_string()
+    }
+
+    fn serialize_i8(self, _v: i8) -> EncoderResult<Self::Ok> {
+        self.expect_string()
+    }
+
+    fn serialize_i16(self, _v: i16) -> EncoderResult<Self::Ok> {
+        self.expect_string()
+    }
+
+    fn serialize_i32(self, _v: i32) -> EncoderResult<Self::Ok> {
+        self.expect_string()
+
+    }
+
+    fn serialize_i64(self, _v: i64) -> EncoderResult<Self::Ok> {
+        self.expect_string()
+    }
+
+    fn serialize_bool(self, _v: bool) -> EncoderResult<Self::Ok> {
+        self.expect_string()
+    }
+
+    fn serialize_f32(self, _v: f32) -> EncoderResult<Self::Ok> {
+        self.expect_string()
+    }
+
+    fn serialize_f64(self, _v: f64) -> EncoderResult<Self::Ok> {
+        self.expect_string()
+    }
+
+    fn serialize_char(self, _v: char) -> EncoderResult<Self::Ok> {
+        self.expect_string()
+    }
+
+    fn serialize_newtype_variant<T: ?Sized>(
+        self,
+        _name: &'static str,
+        _variant_index: u32,
+        _variant: &'static str,
+        _value: &T) -> EncoderResult<Self::Ok> {
+        self.expect_string()
+    }
+
+    fn serialize_seq(self, _len: Option<usize>) -> EncoderResult<Self::SerializeSeq> {
+        self.expect_string()
+    }
+
+    fn serialize_tuple(self, _len: usize) -> EncoderResult<Self::SerializeTuple> {
+        self.expect_string()
+    }
+
+    fn serialize_map(self, _size: Option<usize>) -> EncoderResult<Self::SerializeMap> {
+        self.expect_string()
+    }
+
+    fn serialize_tuple_struct(self, _name: &'static str, _len: usize)
+                              -> EncoderResult<Self::SerializeTupleStruct> {
+        self.expect_string()
+    }
+
+    fn serialize_tuple_variant(
+        self,
+        _name: &'static str,
+        _variant_index: u32,
+        _variant: &'static str,
+        _len: usize) -> EncoderResult<Self::SerializeTupleVariant> {
+        self.expect_string()
+    }
+
+    fn serialize_unit_struct(self, _name: &'static str) -> EncoderResult<Self::Ok> {
+        self.expect_string()
+    }
+
+    fn serialize_unit_variant(self,
+                              _name: &'static str,
+                              _variant_index: u32,
+                              _variant: &'static str) -> EncoderResult<Self::Ok> {
+        self.expect_string()
+    }
+
+    fn serialize_struct_variant(self,
+                                _name: &'static str,
+                                _variant_index: u32,
+                                _variant: &'static str,
+                                _len: usize,
+    ) -> EncoderResult<Self::SerializeStructVariant> {
+        self.expect_string()
+    }
+
+    fn serialize_newtype_struct<T: ?Sized + serde::Serialize>(
+        self,
+        _name: &'static str,
+        value: &T
+    ) -> EncoderResult<Self::Ok> {
+        value.serialize(self)
+    }
+
+    fn serialize_struct(
+        self,
+        _name: &'static str,
+        _len: usize
+    ) -> EncoderResult<Self::SerializeStruct> {
+        self.expect_string()
+    }
+}
+
+
+pub struct SerializeMap<'a, W: io::Write> {
+    parent: &'a mut Encoder<W>,
+    key: Option<util::ByteString>,
+    dict: BTreeMap<util::ByteString, Vec<u8>>
+}
+
+impl<'a, W: io::Write> SerializeMap<'a, W> {
+    fn new(parent: &'a mut Encoder<W>) -> Self {
+        Self {
+            parent,
+            key: None,
+            dict: Default::default()
+        }
+    }
+}
+
+impl<'a, W: io::Write> ser::SerializeMap for SerializeMap<'a, W> {
     type Ok = ();
     type Error = SerializeErr;
 
     fn serialize_key<T: ?Sized>(&mut self, key: &T) -> EncoderResult<()>
     where T: serde::Serialize {
-        expect_value!(self);
-        self.writers.push(vec![]);
-        self.expect_key = true;
-        key.serialize(&mut **self)?;
-        self.expect_key = false;
-        self.is_none = false;
+        self.key = Some(key.serialize(SerializeKey())?);
         Ok(())
     }
 
     fn serialize_value<T: ?Sized>(&mut self, val: &T) -> EncoderResult<()>
-    where T: serde::Serialize{
-        expect_value!(self);
-        val.serialize(&mut **self)?;
-        let key = self.keys.pop();
-        let data = self.writers.pop().unwrap();
-        let dict = self.stack.last_mut().unwrap();
-        dict.insert(key.unwrap(), data);  // TODO why key is not unwrapped before?
-        self.is_none = false;
+    where T: serde::Serialize {
+        let mut data = vec![];
+        let mut enc = Encoder::new(&mut data);
+        val.serialize(&mut enc)?;
+        let key = self.key.take().unwrap();
+        self.dict.insert(key, data);
         Ok(())
     }
 
     fn end(self) -> Result<Self::Ok, Self::Error> {
-        let dict = self.stack.pop().unwrap();
-        self.encode_dict(&dict)?;
-        self.is_none = false;
-        Ok(())
+        self.parent.encode_dict(&self.dict)
     }
 }
-
 
 // Struct is serialized as a map {field_name: value}.
 impl<W: io::Write> ser::SerializeStruct for &mut Encoder<W> {
@@ -1041,7 +1180,6 @@ impl<W: io::Write> ser::SerializeStruct for &mut Encoder<W> {
 
     fn serialize_field<T: ?Sized>(&mut self, key: &'static str, value: &T) -> EncoderResult<()>
     where T: serde::Serialize {
-        expect_value!(self);
         self.writers.push(vec![]);
         value.serialize(&mut **self)?;
 
