@@ -948,8 +948,7 @@ impl<W: io::Write> ser::SerializeSeq for &mut Encoder<W> {
     type Error = SerializeErr;
 
     fn serialize_element<'c, 'd, T: serde::Serialize + ?Sized>(&'c mut self, elt: &'d T) -> EncoderResult<()> {
-        let selff = &mut **self;
-        elt.serialize(selff)
+        elt.serialize(&mut **self)
     }
 
     fn end(self) -> EncoderResult<()> {
