@@ -704,54 +704,38 @@ pub fn encode<T: serde::Serialize>(t: T) -> EncoderResult<Vec<u8>> {
 
 pub struct Encoder<W: io::Write> {
     writer: W,
-    writers: Vec<Vec<u8>>,
+    // This field is used to check that serialized value was none.  It
+    // is used for optimizing struct representation.  One could make
+    // it a return value for serializer, but both exposing it in API
+    // or making a wrapper seems cumbersome to me.
     is_none: bool,
-    stack: Vec<BTreeMap<util::ByteString, Vec<u8>>>,
 }
 
 impl<W: io::Write> Encoder<W> {
     pub fn new(writer: W) -> Encoder<W> {
         Encoder {
             writer: writer,
-            writers: Vec::new(),
             is_none: false,
-            stack: Vec::new()
-        }
-    }
-
-    fn get_writer(&mut self) -> &mut dyn io::Write {
-        if self.writers.len() == 0 {
-            &mut self.writer as &mut dyn io::Write
-        } else {
-            self.writers.last_mut().unwrap() as &mut dyn io::Write
         }
     }
 
     pub fn into_inner(self) -> W {
-        if self.writers.len() == 0 {
-            self.writer
-        } else {
-            // Invariant is: into_inner is called only by user code when Encoder::encode call
-            // is complete, and when it is complete, self.writers is empty.
-            panic!(
-                "Destroying unflushed bencode Encoder.  Shouldn't happen, some invariant is broken."
-            );
-        }
+        self.writer
     }
 
     fn encode_dict<'b, 'c>(&'b mut self, dict: &'c BTreeMap<util::ByteString, Vec<u8>>) -> EncoderResult<()> {
-        write!(self.get_writer(), "d")?;
+        write!(self.writer, "d")?;
         for (key, value) in dict.iter() {
             key.serialize(& mut *self)?;
-            self.get_writer().write_all(value)?;
+            self.writer.write_all(value)?;
         }
-        write!(self.get_writer(), "e")?;
+        write!(self.writer, "e")?;
         Ok(())
     }
 
     fn encode_bytestring(&mut self, v: &[u8]) -> EncoderResult<()> {
-        write!(self.get_writer(), "{}:", v.len())?;
-        Ok(self.get_writer().write_all(v)?)
+        write!(self.writer, "{}:", v.len())?;
+        Ok(self.writer.write_all(v)?)
     }
 
     fn error<T>(&mut self, msg: &'static str) -> EncoderResult<T> {
@@ -795,18 +779,18 @@ impl<'a, W: io::Write> serde::Serializer for &'a mut Encoder<W> {
     type SerializeSeq = Self;
     type SerializeTuple = Self;
     type SerializeMap = SerializeMap<'a, W>;
-    type SerializeStruct = Self;
+    type SerializeStruct = SerializeStruct<'a, W>;
     type SerializeTupleStruct = ser::Impossible<Self::Ok, Self::Error>;
     type SerializeTupleVariant = ser::Impossible<Self::Ok, Self::Error>;
     type SerializeStructVariant = ser::Impossible<Self::Ok, Self::Error>;
 
     fn serialize_unit(self) -> EncoderResult<Self::Ok> {
-        Ok(write!(self.get_writer(), "0:")?)
+        Ok(write!(self.writer, "0:")?)
     }
 
     fn serialize_none(self) -> EncoderResult<()> {
         self.is_none = true;
-        Ok(write!(self.get_writer(), "3:nil")?)
+        Ok(write!(self.writer, "3:nil")?)
     }
 
     fn serialize_some<T: ?Sized + serde::Serialize>(self, value: &T) -> EncoderResult<Self::Ok> {
@@ -820,7 +804,7 @@ impl<'a, W: io::Write> serde::Serializer for &'a mut Encoder<W> {
     fn serialize_u32(self, v: u32) -> EncoderResult<Self::Ok> { self.serialize_i64(v as i64) }
 
     fn serialize_u64(self, v: u64) -> EncoderResult<Self::Ok> {
-        Ok(write!(self.get_writer(), "i{}e", v)?)
+        Ok(write!(self.writer, "i{}e", v)?)
     }
 
     fn serialize_i8(self, v: i8) -> EncoderResult<Self::Ok> { self.serialize_i64(v as i64) }
@@ -830,7 +814,7 @@ impl<'a, W: io::Write> serde::Serializer for &'a mut Encoder<W> {
     fn serialize_i32(self, v: i32) -> EncoderResult<Self::Ok> { self.serialize_i64(v as i64) }
 
     fn serialize_i64(self, v: i64) -> EncoderResult<Self::Ok> {
-        Ok(write!(self.get_writer(), "i{}e", v)?)
+        Ok(write!(self.writer, "i{}e", v)?)
     }
 
     fn serialize_bool(self, v: bool) -> EncoderResult<Self::Ok> {
@@ -875,7 +859,7 @@ impl<'a, W: io::Write> serde::Serializer for &'a mut Encoder<W> {
     }
 
     fn serialize_seq(self, _len: Option<usize>) -> EncoderResult<Self::SerializeSeq> {
-        write!(self.get_writer(), "l")?;  // SerializeSeq::end will write "e"
+        write!(self.writer, "l")?;  // SerializeSeq::end will write "e"
         Ok(self)
     }
 
@@ -884,9 +868,6 @@ impl<'a, W: io::Write> serde::Serializer for &'a mut Encoder<W> {
     }
 
     fn serialize_map(self, _size: Option<usize>) -> EncoderResult<Self::SerializeMap> {
-        // bencode requires keys to be sorted, thus we store key-values into btree.
-        // TODO: hash+sort can be more efficient than btree.
-        self.stack.push(BTreeMap::new());
         Ok(SerializeMap::new(self))
     }
 
@@ -937,9 +918,7 @@ impl<'a, W: io::Write> serde::Serializer for &'a mut Encoder<W> {
         _name: &'static str,
         _len: usize
     ) -> EncoderResult<Self::SerializeStruct> {
-        // We serialize struct as a map {field_name: value}.
-        self.stack.push(BTreeMap::new());
-        Ok(self)
+        Ok(SerializeStruct::new(self))
     }
 }
 
@@ -953,7 +932,7 @@ impl<W: io::Write> ser::SerializeSeq for &mut Encoder<W> {
 
     fn end(self) -> EncoderResult<()> {
         self.is_none = false;
-        Ok(write!(self.get_writer(), "e")?)
+        Ok(write!(self.writer, "e")?)
     }
 }
 
@@ -1134,6 +1113,8 @@ impl ser::Serializer for SerializeKey {
 pub struct SerializeMap<'a, W: io::Write> {
     parent: &'a mut Encoder<W>,
     key: Option<util::ByteString>,
+    // bencode requires keys to be sorted, thus we store key-values into btree.
+    // TODO: hash+sort can be more efficient than btree.
     dict: BTreeMap<util::ByteString, Vec<u8>>
 }
 
@@ -1172,29 +1153,45 @@ impl<'a, W: io::Write> ser::SerializeMap for SerializeMap<'a, W> {
     }
 }
 
+pub struct SerializeStruct<'a, W: io::Write> {
+    parent: &'a mut Encoder<W>,
+    // bencode requires keys to be sorted, thus we store key-values into btree.
+    // TODO: hash+sort can be more efficient than btree.
+    dict: BTreeMap<util::ByteString, Vec<u8>>
+}
+
+impl<'a, W: io::Write> SerializeStruct<'a, W> {
+    fn new(parent: &'a mut Encoder<W>) -> Self {
+        Self {
+            parent,
+            dict: Default::default()
+        }
+    }
+}
+
 // Struct is serialized as a map {field_name: value}.
-impl<W: io::Write> ser::SerializeStruct for &mut Encoder<W> {
+impl<'a, W: io::Write> ser::SerializeStruct for SerializeStruct<'a, W> {
     type Ok = ();
     type Error = SerializeErr;
 
     fn serialize_field<T: ?Sized>(&mut self, key: &'static str, value: &T) -> EncoderResult<()>
     where T: serde::Serialize {
-        self.writers.push(vec![]);
-        value.serialize(&mut **self)?;
+        let mut data = vec![];
+        let mut enc = Encoder::new(&mut data);
+        value.serialize(&mut enc)?;
 
-        let data = self.writers.pop().unwrap();
-        let dict = self.stack.last_mut().unwrap();
-        if !self.is_none {  // It seems fields with None values are just skipped, that makes sens.
-            dict.insert(util::ByteString::from_slice(key.as_bytes()), data);
+        // It seems fields with None values are just skipped, that makes sense.
+        // It doesn't make sense for maps, as it changes set of keys.
+        if !enc.is_none {
+            self.dict.insert(util::ByteString::from_slice(key.as_bytes()), data);
         }
-        self.is_none = false;
+        self.parent.is_none = false;
         Ok(())
     }
 
     fn end(self) -> Result<Self::Ok, Self::Error> {
-        let dict = self.stack.pop().unwrap();
-        self.encode_dict(&dict)?;
-        self.is_none = false;
+        self.parent.encode_dict(&self.dict)?;
+        self.parent.is_none = false;
         Ok(())
     }
 }
