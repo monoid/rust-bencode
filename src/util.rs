@@ -21,8 +21,8 @@ impl ByteString {
     }
 
     pub fn as_slice(&self) -> &[u8] {
-      match self {
-        &ByteString(ref v)  => &v[..]
+      match *self {
+          ByteString(ref v)  => &v[..]
       }
     }
 
@@ -35,23 +35,24 @@ impl ByteString {
 impl fmt::Display for ByteString {
     fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
         use fmt_bytestring;
-        match self {
-            &ByteString(ref v) => fmt_bytestring(&v[..], fmt),
+        match *self {
+            ByteString(ref v) => fmt_bytestring(&v[..], fmt),
         }
     }
 }
 
 impl Serialize for ByteString {
     fn serialize<S: serde::Serializer>(&self, e: S) -> Result<S::Ok, S::Error> {
-        let &ByteString(ref key) = self;
+        let ByteString(ref key) = self;
+        // Looks fishy -- @monoid
         e.serialize_str(unsafe { str::from_utf8_unchecked(&key[..]) })
     }
 }
 
 impl Borrow<[u8]> for ByteString {
     fn borrow(&self) -> &[u8] {
-        match self {
-            &ByteString(ref v)  => v.borrow()
+        match *self {
+            ByteString(ref v)  => v.borrow()
         }
     }
 }

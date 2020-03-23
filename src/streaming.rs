@@ -53,7 +53,7 @@ impl<T: Iterator<Item=u8>> StreamingParser<T> {
     pub fn new(mut reader: T) -> StreamingParser<T> {
         let next = reader.next();
         StreamingParser {
-            reader: reader,
+            reader,
             pos: 0,
             decoded: 0,
             end: false,
@@ -100,7 +100,7 @@ impl<T: Iterator<Item=u8>> StreamingParser<T> {
     fn error_msg<R>(&mut self, msg: String) -> Result<R, Error> {
         Err(Error {
             pos: self.pos,
-            msg: msg
+            msg
         })
     }
 
@@ -124,11 +124,8 @@ impl<T: Iterator<Item=u8>> StreamingParser<T> {
         match self.curr_char() {
             Some('0') => self.next_byte(),
             Some('1' ..= '9') => {
-                loop {
-                    match self.curr_char() {
-                        Some(ch @ '0' ..= '9') => self.parse_digit(ch, sign, &mut num),
-                        _ => break
-                    }
+                while let Some(ch @ '0' ..= '9') = self.curr_char() {
+                    self.parse_digit(ch, sign, &mut num);
                     self.next_byte();
                 }
             }
@@ -142,11 +139,8 @@ impl<T: Iterator<Item=u8>> StreamingParser<T> {
         let mut num = 0;
         match self.curr_char() {
             Some('0' ..= '9') => {
-                loop {
-                    match self.curr_char() {
-                        Some(ch @ '0' ..= '9') => self.parse_digit(ch, sign, &mut num),
-                        _ => break
-                    }
+                while let Some(ch @ '0' ..= '9') = self.curr_char() {
+                    self.parse_digit(ch, sign, &mut num);
                     self.next_byte();
                 }
             }
@@ -176,7 +170,7 @@ impl<T: Iterator<Item=u8>> StreamingParser<T> {
             Some(ValuePosition) => {
                 Ok(DictEnd)
             }
-            _ => return self.error_msg("Unmatched value ending".to_string())
+            _ => self.error_msg("Unmatched value ending".to_string())
         }
     }
 
@@ -304,7 +298,7 @@ mod test {
             assert_stream_eq(unsafe { str::from_utf8_unchecked(&[n]) },
                             &[ParseError(Error{
                                  pos: 0,
-                                 msg: msg })]);
+                                 msg })]);
         }
     }
 

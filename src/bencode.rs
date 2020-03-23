@@ -136,8 +136,8 @@
 
       fn from_bencode(bencode: &bencode::Bencode) -> Result<MyStruct, MyError> {
           use MyError::*;
-          match bencode {
-              &Bencode::Dict(ref m) => {
+          match *bencode {
+              Bencode::Dict(ref m) => {
                   match m.get(&ByteString::from_str("a")) {
                       Some(a) => FromBencode::from_bencode(a).map(|a| {
                           MyStruct{ a: a }
@@ -303,15 +303,17 @@ impl Bencode {
 
 impl serde::Serialize for Bencode {
     fn serialize<S: serde::Serializer>(&self, e: S) -> Result<S::Ok, S::Error> {
-        match self {
+        match *self {
             // Not a backward compatible, as rust-serialize version
             // did nothing, returning Ok(()); but we cannot do nothing
             // with Serde as we have tor return S::Ok somehow.
-            &Bencode::Empty => e.serialize_none(),
-            &Bencode::Number(v) => e.serialize_i64(v),
-            &Bencode::ByteString(ref v) => e.serialize_str(unsafe { str::from_utf8_unchecked(v) }),
-            &Bencode::List(ref v) => v.serialize(e),
-            &Bencode::Dict(ref v) => v.serialize(e)
+            // Anyway, it looks wrong, as serializing list of Nones
+            // and Somes will produce incorrect result. -- @monoid
+            Bencode::Empty => e.serialize_none(),
+            Bencode::Number(v) => e.serialize_i64(v),
+            Bencode::ByteString(ref v) => e.serialize_str(unsafe { str::from_utf8_unchecked(v) }),
+            Bencode::List(ref v) => v.serialize(e),
+            Bencode::Dict(ref v) => v.serialize(e)
         }
     }
 }
@@ -336,9 +338,9 @@ impl FromBencode for () {
     type Err = ();
 
     fn from_bencode(bencode: &Bencode) -> Result<(), ()> {
-        match bencode {
-            &Bencode::ByteString(ref v) => {
-                if v.len() == 0 {
+        match *bencode {
+            Bencode::ByteString(ref v) => {
+                if v.is_empty() {
                     Ok(())
                 } else {
                     Err(())
@@ -351,9 +353,9 @@ impl FromBencode for () {
 
 impl<T: ToBencode> ToBencode for Option<T> {
     fn to_bencode(&self) -> Bencode {
-        match self {
-            &Some(ref v) => v.to_bencode(),
-            &None => Bencode::ByteString(b"nil".to_vec())
+        match *self {
+            Some(ref v) => v.to_bencode(),
+            None => Bencode::ByteString(b"nil".to_vec())
         }
     }
 }
@@ -362,15 +364,12 @@ impl<T: FromBencode> FromBencode for Option<T> {
     type Err = T::Err;
 
     fn from_bencode(bencode: &Bencode) -> Result<Option<T>, T::Err> {
-        match bencode {
-            &Bencode::ByteString(ref v) => {
-                if v == b"nil" {
-                    return Ok(None)
-                }
+        if let Bencode::ByteString(ref v) = *bencode {
+            if v == b"nil" {
+                return Ok(None)
             }
-            _ => ()
         }
-        FromBencode::from_bencode(bencode).map(|v| Some(v))
+        FromBencode::from_bencode(bencode).map(Some)
     }
 }
 macro_rules! derive_num_to_bencode(($t:ty) => (
@@ -390,8 +389,8 @@ macro_rules! derive_num_from_bencode(($t:ty) => (
         type Err = NumFromBencodeError;
 
         fn from_bencode(bencode: &Bencode) -> Result<$t, NumFromBencodeError> {
-            match bencode {
-                &Bencode::Number(v) => match FromPrimitive::from_i64(v) {
+            match *bencode {
+                Bencode::Number(v) => match FromPrimitive::from_i64(v) {
                     Some(n) => Ok(n),
                     None    => Err(NumFromBencodeError::OutOfRange(v)),
                 },
@@ -450,12 +449,13 @@ impl FromBencode for f32 {
 
     fn from_bencode(bencode: &Bencode) -> Result<f32, FloatFromBencodeError> {
         use FloatFromBencodeError::*;
-        match bencode {
-            &Bencode::ByteString(ref v)  => {
+        match *bencode {
+            Bencode::ByteString(ref v)  => {
                 let len = v.len();
-                match len == size_of::<f32>() {
-                  true  => Ok(Cursor::new(&v[..]).read_f32::<BigEndian>().unwrap()),
-                  false => Err(InvalidLen(len)),
+                if len == size_of::<f32>() {
+                    Ok(Cursor::new(&v[..]).read_f32::<BigEndian>().unwrap())
+                } else {
+                    Err(InvalidLen(len))
                 }
             }
             _ => Err(InvalidType),
@@ -476,12 +476,13 @@ impl FromBencode for f64 {
 
     fn from_bencode(bencode: &Bencode) -> Result<f64, FloatFromBencodeError> {
         use FloatFromBencodeError::*;
-        match bencode {
-            &Bencode::ByteString(ref v)  => {
+        match *bencode {
+            Bencode::ByteString(ref v)  => {
                 let len = v.len();
-                match len == size_of::<f64>() {
-                  true  => Ok(Cursor::new(&v[..]).read_f64::<BigEndian>().unwrap()),
-                  false => Err(InvalidLen(len)),
+                if len == size_of::<f64>() {
+                    Ok(Cursor::new(&v[..]).read_f64::<BigEndian>().unwrap())
+                } else {
+                    Err(InvalidLen(len))
                 }
             }
             _ => Err(InvalidType),
@@ -509,8 +510,8 @@ impl FromBencode for bool {
     type Err = BoolFromBencodeError;
 
     fn from_bencode(bencode: &Bencode) -> Result<bool, BoolFromBencodeError> {
-        match bencode {
-            &Bencode::ByteString(ref v) => {
+        match *bencode {
+            Bencode::ByteString(ref v) => {
                 if v == b"true" {
                     Ok(true)
                 } else if v == b"false" {
@@ -577,8 +578,8 @@ impl FromBencode for String {
 
     fn from_bencode(bencode: &Bencode) -> Result<String, StringFromBencodeError> {
         use StringFromBencodeError::*;
-        match bencode {
-            &Bencode::ByteString(ref v) => std::str::from_utf8(v).map(|s| s.to_string()).map_err(FromUtf8),
+        match *bencode {
+            Bencode::ByteString(ref v) => std::str::from_utf8(v).map(|s| s.to_string()).map_err(FromUtf8),
             _ => Err(InvalidType),
         }
     }
@@ -598,8 +599,8 @@ impl<T: FromBencode> FromBencode for Vec<T> {
     type Err = VecFromBencodeError<T::Err>;
 
     fn from_bencode(bencode: &Bencode) -> Result<Vec<T>, VecFromBencodeError<T::Err>> {
-        match bencode {
-            &Bencode::List(ref es) => {
+        match *bencode {
+            Bencode::List(ref es) => {
                 let mut list = Vec::new();
                 for e in es.iter() {
                     match FromBencode::from_bencode(e) {
@@ -633,9 +634,9 @@ pub enum MapFromBencodeError<E> {
 
 macro_rules! map_from_bencode {
     ($mty:ident, $bencode:expr) => {{
-        let res = match $bencode {
-            &Bencode::Dict(ref map) => {
-                let mut m = $mty::new();
+        let res = match *$bencode {
+            Bencode::Dict(ref map) => {
+                let mut m = $mty::default();
                 for (key, value) in map.iter() {
                     match str::from_utf8(key.as_slice()) {
                         Ok(k) => {
@@ -669,21 +670,21 @@ impl<T: FromBencode> FromBencode for BTreeMap<String, T> {
     }
 }
 
-impl<T: ToBencode> ToBencode for HashMap<String, T> {
+impl<T: ToBencode, S: std::hash::BuildHasher> ToBencode for HashMap<String, T, S> {
     fn to_bencode(&self) -> Bencode {
         map_to_bencode!(self)
     }
 }
 
-impl<T: FromBencode> FromBencode for HashMap<String, T> {
+impl<T: FromBencode, S: std::hash::BuildHasher + Default> FromBencode for HashMap<String, T, S> {
     type Err = MapFromBencodeError<T::Err>;
-    fn from_bencode(bencode: &Bencode) -> Result<HashMap<String, T>, MapFromBencodeError<T::Err>> {
+     fn from_bencode(bencode: &Bencode) -> Result<HashMap<String, T, S>, MapFromBencodeError<T::Err>> {
         map_from_bencode!(HashMap, bencode)
     }
 }
 
 pub fn from_buffer(buf: &[u8]) -> Result<Bencode, Error> {
-    from_iter(buf.iter().map(|b| *b))
+    from_iter(buf.iter().copied())
 }
 
 pub fn from_vec(buf: Vec<u8>) -> Result<Bencode, Error> {
@@ -714,7 +715,7 @@ pub struct Encoder<W: io::Write> {
 impl<W: io::Write> Encoder<W> {
     pub fn new(writer: W) -> Encoder<W> {
         Encoder {
-            writer: writer,
+            writer,
             is_none: false,
         }
     }
@@ -1204,7 +1205,7 @@ pub struct Parser<T> {
 impl<T: Iterator<Item=BencodeEvent>> Parser<T> {
     pub fn new(reader: T) -> Parser<T> {
         Parser {
-            reader: reader,
+            reader,
             depth: 0
         }
     }
@@ -1395,8 +1396,8 @@ impl<'de, 'a> serde::Deserializer<'de> for &'a mut Decoder<'de> {
     }
 
     fn deserialize_string<V: de::Visitor<'de>>(self, visitor: V) -> DecoderResult<V::Value> {
-        match self.value {
-            &Bencode::ByteString(ref v) => {
+        match *self.value {
+            Bencode::ByteString(ref v) => {
                 String::from_utf8(v.clone()
                 ).map_err(|err| StringEncoding(err.into_bytes())
                 ).and_then(|v| visitor.visit_string(v)
@@ -1415,9 +1416,9 @@ impl<'de, 'a> serde::Deserializer<'de> for &'a mut Decoder<'de> {
     }
 
     fn deserialize_option<V: de::Visitor<'de>>(self, visitor: V) -> DecoderResult<V::Value> {
-        match self.value {
-            &Bencode::Empty => visitor.visit_none(),
-            &Bencode::ByteString(ref v) => {
+        match *self.value {
+            Bencode::Empty => visitor.visit_none(),
+            Bencode::ByteString(ref v) => {
                 if v == b"nil" {
                     visitor.visit_none()
                 } else {
